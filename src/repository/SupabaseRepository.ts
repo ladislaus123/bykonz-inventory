@@ -501,6 +501,13 @@ function pruneUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
   return out;
 }
 
-function mapError(op: string, error: { message: string; code?: string }): Error {
-  return new Error(`[SupabaseRepository.${op}] ${error.code ?? ''} ${error.message}`.trim());
+function mapError(op: string, error: { message: string; code?: string; cause?: unknown }): Error {
+  // Network failures (undici "fetch failed") hide the real reason in .cause.
+  let detail = '';
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause && typeof cause === 'object') {
+    const c = cause as { code?: string; message?: string };
+    detail = ` (cause: ${c.code ?? ''} ${c.message ?? ''})`.trimEnd();
+  }
+  return new Error(`[SupabaseRepository.${op}] ${error.code ?? ''} ${error.message}${detail}`.trim());
 }

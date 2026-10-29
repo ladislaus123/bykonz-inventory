@@ -18,6 +18,8 @@ import { WahaTransport } from './transport/WahaTransport.js';
 import { Worker } from './worker.js';
 
 async function main() {
+  await preflightSupabase();
+
   const transport = new WahaTransport(config.waha);
   const repo = new SupabaseRepository(config.supabase.url, config.supabase.serviceRoleKey);
   const embeddings = new EmbeddingClient(config.openrouter);
@@ -58,6 +60,30 @@ async function main() {
   app.listen(config.server.port, () => {
     console.log(`bykonz webhook server listening on :${config.server.port}`);
   });
+}
+
+/** Fail fast with a clear message if Supabase isn't reachable / misconfigured. */
+async function preflightSupabase(): Promise<void> {
+  const url = config.supabase.url;
+  const key = config.supabase.serviceRoleKey;
+  console.log(`supabase url = ${url || '(empty!)'}  key = ${key ? `set (${key.length} chars)` : '(empty!)'}`);
+  if (!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/.test(url)) {
+    console.warn('⚠️  SUPABASE_URL does not look like https://<ref>.supabase.co');
+  }
+  try {
+    const res = await fetch(`${url.replace(/\/$/, '')}/rest/v1/`, {
+      headers: { apikey: key, Authorization: `Bearer ${key}` },
+    });
+    console.log(`supabase preflight: HTTP ${res.status}`);
+  } catch (err) {
+    const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+    console.error(
+      `❌ cannot reach Supabase REST API: ${(err as Error).message}` +
+        (cause ? ` (cause: ${cause.code ?? ''} ${cause.message ?? ''})` : ''),
+    );
+    console.error('   Check SUPABASE_URL is set correctly in your host env (Render dashboard).');
+    throw err;
+  }
 }
 
 main().catch((err) => {
