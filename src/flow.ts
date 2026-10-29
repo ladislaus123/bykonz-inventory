@@ -11,9 +11,12 @@
  * a worker that drains the `jobs` table; see runEnrichment() for the seam.
  */
 
+import { createHash, randomUUID } from 'node:crypto';
+
 import { ptBR } from './messages.pt-BR.js';
 import type { EmbeddingClient } from './embeddings/EmbeddingClient.js';
 import type { Repository } from './repository/Repository.js';
+import type { Storage } from './storage/Storage.js';
 import type { IncomingMessage, MessageTransport } from './transport/MessageTransport.js';
 
 export class WhatsAppFlow {
@@ -21,6 +24,7 @@ export class WhatsAppFlow {
     private readonly transport: MessageTransport,
     private readonly repo: Repository,
     private readonly embeddings: EmbeddingClient,
+    private readonly storage: Storage,
   ) {}
 
   /** Wire this as the transport's message handler. */
@@ -59,7 +63,9 @@ export class WhatsAppFlow {
 
     // Download bytes now (WAHA media URLs are short-lived) and hand to storage.
     const { data, mimeType } = await this.transport.downloadMedia(msg);
-    const storageUrl = await this.uploadToStorage(data, mimeType); // see TODO below
+    const sha256 = createHash('sha256').update(data).digest('hex');
+    const key = `cards/${userId}/${randomUUID()}.${extForMime(mimeType)}`;
+    const storageKey = await this.storage.upload({ key, data, contentType: mimeType });
 
     // Create a draft entity + its media, then enqueue the background agent.
     const entity = await this.repo.createEntity({
@@ -70,9 +76,10 @@ export class WhatsAppFlow {
     });
     const media = await this.repo.createMedia({
       entityId: entity.id,
-      storageUrl,
+      storageUrl: storageKey, // object path; resolve to a signed URL on read
       mediaType: 'image',
       mimeType,
+      sha256,
       waMessageId: msg.id,
     });
     await this.repo.enqueueJob({
@@ -105,8 +112,8 @@ export class WhatsAppFlow {
     }
 
     await this.repo.setEntityStatus(pending.id, 'confirmed');
-    // Embed the confirmed description so it is searchable.
-    if (pending.description) {
+    // The agent normally embeds during enrichment; embed here only as a fallback.
+    if (pending.description && !pending.descriptionEmbedding) {
       const vec = await this.embeddings.embedText(pending.description);
       await this.repo.setEntityEmbedding(pending.id, vec, this.embeddings.model);
     }
@@ -114,18 +121,14 @@ export class WhatsAppFlow {
   }
 
   /**
-   * Called by the worker once the agent has OCR'd the card and enriched it from
-   * the web. Updates the draft entity and asks the user to confirm.
+   * Called by the worker once the agent has written + embedded the entity.
+   * Just asks the user to confirm (the agent already persisted the data).
    */
   async presentProposal(
     chatId: string,
-    entityId: string,
+    _entityId: string,
     proposal: { name: string; summary: string },
   ): Promise<void> {
-    await this.repo.updateEntity(entityId, {
-      name: proposal.name,
-      description: proposal.summary,
-    });
     await this.transport.sendButtons(chatId, ptBR.proposal(proposal), [
       { id: 'accept', title: ptBR.accept },
       { id: 'reject', title: ptBR.reject },
@@ -134,16 +137,26 @@ export class WhatsAppFlow {
 
   // --- seams to implement per your infra -------------------------------------
 
-  /** TODO: upload bytes to Supabase Storage / S3 and return the public URL. */
-  private async uploadToStorage(_data: Buffer, _mimeType: string): Promise<string> {
-    throw new Error('uploadToStorage not implemented — wire Supabase Storage / S3 here');
-  }
-
   /** Resolve a user's chat id. For 1:1 WhatsApp, wa_id == chatId. */
   private async chatIdFor(userId: string): Promise<string> {
     const user = await this.repo.getUserById(userId);
     if (!user?.waId) throw new Error(`no wa_id for user ${userId}`);
     return user.waId;
+  }
+}
+
+function extForMime(mime: string): string {
+  switch (mime) {
+    case 'image/jpeg':
+      return 'jpg';
+    case 'image/png':
+      return 'png';
+    case 'image/webp':
+      return 'webp';
+    case 'application/pdf':
+      return 'pdf';
+    default:
+      return 'bin';
   }
 }
 

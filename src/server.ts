@@ -7,20 +7,33 @@
 
 import express from 'express';
 
+import { EnrichmentAgent } from './agent/EnrichmentAgent.js';
+import { OpenRouterChat } from './agent/OpenRouterChat.js';
 import { config } from './config.js';
 import { EmbeddingClient } from './embeddings/EmbeddingClient.js';
 import { WhatsAppFlow } from './flow.js';
 import { SupabaseRepository } from './repository/SupabaseRepository.js';
+import { createStorage } from './storage/index.js';
 import { WahaTransport } from './transport/WahaTransport.js';
+import { Worker } from './worker.js';
 
 async function main() {
   const transport = new WahaTransport(config.waha);
   const repo = new SupabaseRepository(config.supabase.url, config.supabase.serviceRoleKey);
   const embeddings = new EmbeddingClient(config.openrouter);
-  const flow = new WhatsAppFlow(transport, repo, embeddings);
+  const storage = await createStorage();
+  const flow = new WhatsAppFlow(transport, repo, embeddings, storage);
 
   transport.onMessage(flow.handle);
   await transport.start();
+
+  // Autonomous enrichment worker (agentic loop over OpenRouter).
+  if (config.worker.enabled) {
+    const chat = new OpenRouterChat(config.openrouter.apiKey);
+    const agent = new EnrichmentAgent(chat, repo, embeddings, config.agent);
+    const worker = new Worker(repo, agent, flow, storage, config.worker.pollMs);
+    worker.start();
+  }
 
   const app = express();
   app.use(express.json({ limit: '25mb' }));
