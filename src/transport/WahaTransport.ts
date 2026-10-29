@@ -213,8 +213,19 @@ export class WahaTransport implements MessageTransport {
         mimeType: message.media.mimeType ?? 'application/octet-stream',
       };
     }
-    const url = message.media?.url;
-    if (!url) throw new Error(`message ${message.id} has no downloadable media`);
+    const rawUrl = message.media?.url;
+    if (!rawUrl) throw new Error(`message ${message.id} has no downloadable media`);
+
+    // WAHA often returns an internal host (http://localhost:3000/api/files/...).
+    // Rewrite it onto the configured public base so our app can actually reach it.
+    let url = rawUrl;
+    try {
+      const u = new URL(rawUrl);
+      url = `${this.cfg.baseUrl}${u.pathname}${u.search}`;
+    } catch {
+      /* not an absolute URL; use as-is */
+    }
+    if (url !== rawUrl) log('waha', `media url rewritten -> ${url}`);
 
     const res = await fetch(url, { headers: { 'X-Api-Key': this.cfg.apiKey } });
     if (!res.ok) throw new Error(`downloadMedia failed: ${res.status} ${res.statusText}`);
