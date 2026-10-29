@@ -45,10 +45,39 @@ interface WahaEvent {
 export class WahaTransport implements MessageTransport {
   private readonly cfg: WahaConfig;
   private readonly handlers: MessageHandler[] = [];
+  /** Cache of resolved @lid -> @c.us phone JIDs. */
+  private readonly lidToPn = new Map<string, string>();
 
   constructor(cfg: WahaConfig) {
     // Strip any trailing slash so `${baseUrl}/api/...` never becomes `//api/...`.
     this.cfg = { ...cfg, baseUrl: cfg.baseUrl.replace(/\/+$/, '') };
+  }
+
+  /**
+   * On GOWS, sending to a "<n>@lid" chatId misroutes to Status/Stories. Resolve
+   * it to the real "<phone>@c.us" via WAHA's /lids/{lid} endpoint before sending.
+   * Falls back to the original id if resolution fails (logged, non-fatal).
+   */
+  private async resolveTarget(chatId: ChatId): Promise<ChatId> {
+    if (!chatId.endsWith('@lid')) return chatId;
+    const cached = this.lidToPn.get(chatId);
+    if (cached) return cached;
+    try {
+      const res = await this.api<{ pn?: string; phoneNumber?: string; id?: string }>(
+        `/api/${encodeURIComponent(this.cfg.session)}/lids/${encodeURIComponent(chatId)}`,
+        'GET',
+      );
+      const pn = res?.pn ?? res?.phoneNumber ?? res?.id;
+      if (pn && pn.endsWith('@c.us')) {
+        this.lidToPn.set(chatId, pn);
+        log('waha', `resolved ${chatId} -> ${pn}`);
+        return pn;
+      }
+      log('waha', `lid resolve: no @c.us pn for ${chatId}`, res);
+    } catch (err) {
+      log('waha', `lid resolve failed for ${chatId}: ${(err as Error).message}`);
+    }
+    return chatId;
   }
 
   async start(): Promise<void> {
@@ -87,6 +116,7 @@ export class WahaTransport implements MessageTransport {
       return;
     }
 
+    log('waha', 'raw payload', JSON.stringify(p).slice(0, 900));
     const message = this.normalize(p);
     // message.any also fires for our own outbound echoes; skip those.
     if (message.fromMe) {
@@ -125,9 +155,10 @@ export class WahaTransport implements MessageTransport {
   }
 
   async sendText(chatId: ChatId, text: string): Promise<string> {
+    const target = await this.resolveTarget(chatId);
     const res = await this.api<{ id?: string }>('/api/sendText', 'POST', {
       session: this.cfg.session,
-      chatId,
+      chatId: target,
       text,
     });
     return res?.id ?? '';
@@ -142,9 +173,10 @@ export class WahaTransport implements MessageTransport {
     else if (image.data) file.data = image.data.toString('base64');
     else throw new Error('sendImage requires either url or data');
 
+    const target = await this.resolveTarget(chatId);
     const res = await this.api<{ id?: string }>('/api/sendImage', 'POST', {
       session: this.cfg.session,
-      chatId,
+      chatId: target,
       file,
       caption: image.caption,
     });
@@ -158,10 +190,11 @@ export class WahaTransport implements MessageTransport {
    * to be matched against the button ids/titles by the flow layer.
    */
   async sendButtons(chatId: ChatId, body: string, buttons: ReplyButton[]): Promise<string> {
+    const target = await this.resolveTarget(chatId);
     try {
       const res = await this.api<{ id?: string }>('/api/sendButtons', 'POST', {
         session: this.cfg.session,
-        chatId,
+        chatId: target,
         header: '',
         body,
         buttons: buttons.map((b) => ({ id: b.id, body: b.title })),
