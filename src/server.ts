@@ -43,6 +43,12 @@ async function main() {
 
   app.get('/health', (_req, res) => res.json({ ok: true }));
 
+  // Reachability test: open this in a browser to confirm the server is public.
+  app.get('/webhook/waha', (_req, res) => {
+    log('webhook', 'GET /webhook/waha (reachability check)');
+    res.json({ ok: true, hint: 'POST WAHA message events here' });
+  });
+
   app.post('/webhook/waha', async (req, res) => {
     const event = (req.body as { event?: string })?.event;
     const msgId = (req.body as { payload?: { id?: string } })?.payload?.id;

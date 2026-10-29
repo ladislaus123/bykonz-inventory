@@ -47,7 +47,8 @@ export class WahaTransport implements MessageTransport {
   private readonly handlers: MessageHandler[] = [];
 
   constructor(cfg: WahaConfig) {
-    this.cfg = cfg;
+    // Strip any trailing slash so `${baseUrl}/api/...` never becomes `//api/...`.
+    this.cfg = { ...cfg, baseUrl: cfg.baseUrl.replace(/\/+$/, '') };
   }
 
   async start(): Promise<void> {
@@ -74,8 +75,10 @@ export class WahaTransport implements MessageTransport {
    */
   async handleWebhook(body: unknown): Promise<void> {
     const evt = body as WahaEvent;
-    if (!evt || (evt.event !== 'message' && evt.event !== 'message.any')) {
-      log('waha', `skip: event "${evt?.event}" is not a message event`);
+    // Process only 'message' (incoming). WAHA also emits 'message.any' for the
+    // same message (incl. our own echoes), which would double-process it.
+    if (!evt || evt.event !== 'message') {
+      log('waha', `skip: event "${evt?.event}" (only 'message' is processed)`);
       return;
     }
     const p = evt.payload;
@@ -105,7 +108,7 @@ export class WahaTransport implements MessageTransport {
       id: p.id,
       chatId: p.from,
       from: p.from,
-      type: mapType(p.type, p.hasMedia),
+      type: mapType(p.type, p.hasMedia, p.media?.mimetype),
       timestamp: p.timestamp ?? Math.floor(Date.now() / 1000),
       fromMe: Boolean(p.fromMe),
       raw: p,
@@ -225,7 +228,11 @@ export class WahaTransport implements MessageTransport {
   }
 }
 
-function mapType(wahaType: string | undefined, hasMedia: boolean | undefined): IncomingMessageType {
+function mapType(
+  wahaType: string | undefined,
+  hasMedia: boolean | undefined,
+  mimetype: string | undefined,
+): IncomingMessageType {
   switch (wahaType) {
     case 'image':
       return 'image';
@@ -240,7 +247,13 @@ function mapType(wahaType: string | undefined, hasMedia: boolean | undefined): I
     case 'chat':
     case 'text':
       return 'text';
-    default:
-      return hasMedia ? 'other' : 'text';
   }
+  // WAHA didn't give a usable `type` — infer from the media mimetype.
+  if (mimetype) {
+    if (mimetype.startsWith('image/')) return 'image';
+    if (mimetype.startsWith('video/')) return 'video';
+    if (mimetype.startsWith('audio/')) return 'audio';
+    if (mimetype === 'application/pdf') return 'document';
+  }
+  return hasMedia ? 'other' : 'text';
 }

@@ -41,8 +41,15 @@ export class WhatsAppFlow {
       await this.repo.updateUser(user.id, { lastSeenAt: new Date().toISOString() });
       await this.transport.markSeen?.(msg);
 
-      if (msg.type === 'image' || msg.type === 'document') {
+      const hasDownloadableMedia = Boolean(msg.media?.url || msg.media?.base64);
+      if (msg.type === 'image' || msg.type === 'document' || hasDownloadableMedia) {
         await this.onCardPhoto(msg, user.id);
+        return;
+      }
+      if (msg.media || msg.type === 'other') {
+        // Media was signalled but no bytes to fetch — WAHA media download is off.
+        logErr('flow', `media present but not downloadable (type=${msg.type}); check WAHA media config`);
+        await this.transport.sendText(msg.chatId, ptBR.askForPhoto);
         return;
       }
 
