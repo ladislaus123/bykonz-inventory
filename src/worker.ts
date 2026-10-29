@@ -12,6 +12,7 @@
 
 import type { EnrichmentAgent } from './agent/EnrichmentAgent.js';
 import type { WhatsAppFlow } from './flow.js';
+import { log, logErr } from './log.js';
 import type { Repository } from './repository/Repository.js';
 import type { Storage } from './storage/Storage.js';
 import type { Job } from './types/domain.js';
@@ -31,7 +32,7 @@ export class Worker {
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => void this.tick(), this.pollMs);
-    console.log(`worker started (poll every ${this.pollMs}ms)`);
+    log('worker', `started (poll every ${this.pollMs}ms)`);
   }
 
   stop(): void {
@@ -49,13 +50,14 @@ export class Worker {
         await this.process(job);
       }
     } catch (err) {
-      console.error('worker tick failed:', err);
+      logErr('worker', 'tick failed', err);
     } finally {
       this.ticking = false;
     }
   }
 
   private async process(job: Job): Promise<void> {
+    log('worker', `picked up job ${job.id} (${job.job}) entity=${job.entityId}`);
     await this.repo.markJobRunning(job.id);
     try {
       if (!job.entityId || !job.entityMediaId) {
@@ -66,20 +68,25 @@ export class Worker {
 
       // storage_url holds the object path; sign it so the model can fetch it.
       const imageUrl = await this.storage.getSignedUrl(media.storageUrl, 600);
+      log('worker', `job ${job.id}: signed image URL ready, running agent…`);
 
       const result = await this.agent.run({ entityId: job.entityId, imageUrl });
+      log('worker', `job ${job.id}: agent finished name="${result.name}"`);
 
       const chatId = String(job.payload.chatId ?? '');
       if (chatId) {
         await this.flow.presentProposal(chatId, job.entityId, result);
+        log('worker', `job ${job.id}: proposal sent to ${chatId}`);
+      } else {
+        logErr('worker', `job ${job.id}: no chatId in payload, skipping proposal`);
       }
 
       await this.repo.markJobDone(job.id, { name: result.name });
-      console.log(`job ${job.id} done: ${result.name}`);
+      log('worker', `job ${job.id} done: ${result.name}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await this.repo.markJobFailed(job.id, msg, { retry: true });
-      console.error(`job ${job.id} failed: ${msg}`);
+      logErr('worker', `job ${job.id} failed (will retry): ${msg}`, err);
     }
   }
 }

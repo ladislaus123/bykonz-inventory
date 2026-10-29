@@ -7,6 +7,7 @@
  *   - Outbound: POST /api/sendText, /api/sendImage, etc. with header X-Api-Key.
  */
 
+import { log } from '../log.js';
 import type {
   ChatId,
   IncomingMessage,
@@ -73,14 +74,29 @@ export class WahaTransport implements MessageTransport {
    */
   async handleWebhook(body: unknown): Promise<void> {
     const evt = body as WahaEvent;
-    if (!evt || (evt.event !== 'message' && evt.event !== 'message.any')) return;
+    if (!evt || (evt.event !== 'message' && evt.event !== 'message.any')) {
+      log('waha', `skip: event "${evt?.event}" is not a message event`);
+      return;
+    }
     const p = evt.payload;
-    if (!p || !p.id) return;
+    if (!p || !p.id) {
+      log('waha', 'skip: event has no payload.id');
+      return;
+    }
 
     const message = this.normalize(p);
     // message.any also fires for our own outbound echoes; skip those.
-    if (message.fromMe) return;
+    if (message.fromMe) {
+      log('waha', `skip: message ${message.id} is fromMe`);
+      return;
+    }
 
+    log(
+      'waha',
+      `dispatch message id=${message.id} from=${message.from} type=${message.type} hasMedia=${Boolean(
+        message.media,
+      )}`,
+    );
     await Promise.all(this.handlers.map((h) => h(message)));
   }
 

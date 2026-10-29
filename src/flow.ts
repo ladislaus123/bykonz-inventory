@@ -13,6 +13,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 
+import { log, logErr } from './log.js';
 import { ptBR } from './messages.pt-BR.js';
 import type { EmbeddingClient } from './embeddings/EmbeddingClient.js';
 import type { Repository } from './repository/Repository.js';
@@ -29,43 +30,61 @@ export class WhatsAppFlow {
 
   /** Wire this as the transport's message handler. */
   handle = async (msg: IncomingMessage): Promise<void> => {
-    const user = await this.repo.upsertUserByWaId(msg.from, {
-      name: msg.from,
-      contact: msg.from,
-      waId: msg.from,
-    });
-    await this.repo.updateUser(user.id, { lastSeenAt: new Date().toISOString() });
-    await this.transport.markSeen?.(msg);
+    try {
+      log('flow', `handle message id=${msg.id} from=${msg.from} type=${msg.type}`);
+      const user = await this.repo.upsertUserByWaId(msg.from, {
+        name: msg.from,
+        contact: msg.from,
+        waId: msg.from,
+      });
+      log('flow', `user upserted id=${user.id} wa_id=${user.waId}`);
+      await this.repo.updateUser(user.id, { lastSeenAt: new Date().toISOString() });
+      await this.transport.markSeen?.(msg);
 
-    if (msg.type === 'image' || msg.type === 'document') {
-      await this.onCardPhoto(msg, user.id);
-      return;
-    }
-
-    if (msg.type === 'text') {
-      const decision = parseDecision(msg.text ?? '');
-      if (decision) {
-        await this.onDecision(user.id, decision);
-      } else if (isGreeting(msg.text ?? '')) {
-        await this.transport.sendText(msg.chatId, ptBR.welcome);
-      } else {
-        await this.transport.sendText(msg.chatId, ptBR.notUnderstood);
+      if (msg.type === 'image' || msg.type === 'document') {
+        await this.onCardPhoto(msg, user.id);
+        return;
       }
-      return;
-    }
 
-    await this.transport.sendText(msg.chatId, ptBR.askForPhoto);
+      if (msg.type === 'text') {
+        const decision = parseDecision(msg.text ?? '');
+        if (decision) {
+          log('flow', `decision=${decision}`);
+          await this.onDecision(user.id, decision);
+        } else if (isGreeting(msg.text ?? '')) {
+          log('flow', 'greeting -> welcome');
+          await this.transport.sendText(msg.chatId, ptBR.welcome);
+        } else {
+          log('flow', 'unrecognized text -> notUnderstood');
+          await this.transport.sendText(msg.chatId, ptBR.notUnderstood);
+        }
+        return;
+      }
+
+      log('flow', `unsupported type ${msg.type} -> askForPhoto`);
+      await this.transport.sendText(msg.chatId, ptBR.askForPhoto);
+    } catch (err) {
+      logErr('flow', `handle failed for message ${msg.id}`, err);
+      // Best-effort: tell the user something went wrong instead of silence.
+      await this.transport
+        .sendText(msg.chatId, 'Ops, tive um problema ao processar sua mensagem. Tente novamente.')
+        .catch(() => undefined);
+    }
   };
 
   private async onCardPhoto(msg: IncomingMessage, userId: string): Promise<void> {
+    log('flow', `onCardPhoto start msg=${msg.id} mediaUrl=${msg.media?.url ?? '(none)'}`);
     await this.transport.sendText(msg.chatId, ptBR.received);
     await this.transport.sendTyping?.(msg.chatId, true);
 
     // Download bytes now (WAHA media URLs are short-lived) and hand to storage.
     const { data, mimeType } = await this.transport.downloadMedia(msg);
+    log('flow', `media downloaded ${data.length} bytes mime=${mimeType}`);
+
     const sha256 = createHash('sha256').update(data).digest('hex');
     const key = `cards/${userId}/${randomUUID()}.${extForMime(mimeType)}`;
     const storageKey = await this.storage.upload({ key, data, contentType: mimeType });
+    log('flow', `media uploaded key=${storageKey}`);
 
     // Create a draft entity + its media, then enqueue the background agent.
     const entity = await this.repo.createEntity({
@@ -74,6 +93,8 @@ export class WhatsAppFlow {
       source: 'business_card',
       createdBy: userId,
     });
+    log('flow', `entity created id=${entity.id}`);
+
     const media = await this.repo.createMedia({
       entityId: entity.id,
       storageUrl: storageKey, // object path; resolve to a signed URL on read
@@ -82,7 +103,9 @@ export class WhatsAppFlow {
       sha256,
       waMessageId: msg.id,
     });
-    await this.repo.enqueueJob({
+    log('flow', `media row created id=${media.id}`);
+
+    const job = await this.repo.enqueueJob({
       userId,
       job: 'extract_card',
       entityId: entity.id,
@@ -90,6 +113,7 @@ export class WhatsAppFlow {
       waMessageId: msg.id,
       payload: { chatId: msg.chatId },
     });
+    log('flow', `job enqueued id=${job.id} -> worker will pick it up`);
     await this.transport.sendTyping?.(msg.chatId, false);
   }
 

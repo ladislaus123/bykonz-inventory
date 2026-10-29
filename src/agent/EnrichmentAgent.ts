@@ -12,6 +12,7 @@
  * The entity stays `pending_review`; the WhatsApp accept/deny step confirms it.
  */
 
+import { log } from '../log.js';
 import type { EmbeddingClient } from '../embeddings/EmbeddingClient.js';
 import type { Repository } from '../repository/Repository.js';
 import type { NewEntity } from '../types/domain.js';
@@ -118,6 +119,7 @@ export class EnrichmentAgent {
 
     let result: AgentResult | null = null;
 
+    log('agent', `run start entity=${input.entityId} model=${this.cfg.model}`);
     for (let step = 0; step < this.cfg.maxSteps; step++) {
       const assistant = await this.chat.complete({
         model: this.cfg.model,
@@ -129,6 +131,7 @@ export class EnrichmentAgent {
       messages.push(assistant);
 
       const calls = assistant.tool_calls ?? [];
+      log('agent', `step ${step}: ${calls.length} tool call(s) [${calls.map((c) => c.function.name).join(', ')}]`);
       if (calls.length === 0) break; // model stopped calling tools
 
       for (const call of calls) {
@@ -166,8 +169,10 @@ export class EnrichmentAgent {
     if (!entity) throw new Error(`entity ${input.entityId} vanished`);
 
     if (entity.description && !entity.descriptionEmbedding) {
+      log('agent', `embedding description for entity ${entity.id}`);
       const vec = await this.embeddings.embedText(entity.description);
       await this.repo.setEntityEmbedding(entity.id, vec, this.embeddings.model);
+      log('agent', `embedding stored (${vec.length} dims)`);
     }
 
     return (

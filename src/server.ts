@@ -10,6 +10,7 @@ import express from 'express';
 import { EnrichmentAgent } from './agent/EnrichmentAgent.js';
 import { OpenRouterChat } from './agent/OpenRouterChat.js';
 import { config } from './config.js';
+import { log, logErr } from './log.js';
 import { EmbeddingClient } from './embeddings/EmbeddingClient.js';
 import { WhatsAppFlow } from './flow.js';
 import { SupabaseRepository } from './repository/SupabaseRepository.js';
@@ -43,17 +44,24 @@ async function main() {
   app.get('/health', (_req, res) => res.json({ ok: true }));
 
   app.post('/webhook/waha', async (req, res) => {
+    const event = (req.body as { event?: string })?.event;
+    const msgId = (req.body as { payload?: { id?: string } })?.payload?.id;
+    log('webhook', `received event=${event ?? '?'} id=${msgId ?? '-'}`);
+
     // Optional shared-secret check (configure the same value on WAHA).
     if (config.server.webhookSecret) {
       const got = req.header('x-api-key');
-      if (got !== config.server.webhookSecret) return res.sendStatus(401);
+      if (got !== config.server.webhookSecret) {
+        logErr('webhook', 'rejected: bad x-api-key');
+        return res.sendStatus(401);
+      }
     }
     // Ack immediately; process asynchronously so WAHA doesn't retry on slow work.
     res.sendStatus(200);
     try {
       await transport.handleWebhook(req.body);
     } catch (err) {
-      console.error('webhook handling failed:', err);
+      logErr('webhook', 'handling failed', err);
     }
   });
 
