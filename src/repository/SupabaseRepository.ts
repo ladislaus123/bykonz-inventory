@@ -15,12 +15,14 @@ import type {
   ConversationStateName,
   Embedding,
   Entity,
+  EntityContact,
   EntityMatch,
   EntityMedia,
   EntityStatus,
   Job,
   MediaMatch,
   NewEntity,
+  NewEntityContact,
   NewEntityMedia,
   NewJob,
   NewUser,
@@ -283,6 +285,37 @@ export class SupabaseRepository implements Repository {
     return (data ?? []) as MediaMatch[];
   }
 
+  /* ======================= entity_contacts ======================= */
+
+  async createContact(input: NewEntityContact): Promise<EntityContact> {
+    const { data, error } = await this.db
+      .from('entity_contacts')
+      .insert(pruneUndefined({
+        entity_id: input.entityId,
+        name: input.name,
+        role: input.role,
+        phone: input.phone,
+        email: input.email,
+        label: input.label,
+        source: input.source,
+        metadata: input.metadata ?? {},
+      }))
+      .select(CONTACT_COLS)
+      .single();
+    if (error) throw mapError('createContact', error);
+    return rowToContact(data);
+  }
+
+  async listContactsByEntity(entityId: UUID): Promise<EntityContact[]> {
+    const { data, error } = await this.db
+      .from('entity_contacts')
+      .select(CONTACT_COLS)
+      .eq('entity_id', entityId)
+      .order('created_at', { ascending: true });
+    if (error) throw mapError('listContactsByEntity', error);
+    return (data ?? []).map(rowToContact);
+  }
+
   /* ======================= conversation state ======================= */
 
   async getConversationState(userId: UUID): Promise<ConversationState> {
@@ -422,6 +455,7 @@ const ENTITY_COLS =
   'id,name,description,description_embedding,metadata,status,source,phone,email,website,address,category,confidence,enrichment,embedding_model,embedding_dim,created_by,created_at,modified_at,confirmed_at';
 const MEDIA_COLS =
   'id,entity_id,embedding,storage_url,media_type,mime_type,sha256,caption,wa_message_id,width,height,embedding_model,created_at';
+const CONTACT_COLS = 'id,entity_id,name,role,phone,email,label,source,metadata,created_at';
 
 /* ======================= row mappers ======================= */
 
@@ -478,6 +512,21 @@ function rowToMedia(r: Row): EntityMedia {
     width: r.width ?? null,
     height: r.height ?? null,
     embeddingModel: r.embedding_model ?? null,
+    createdAt: r.created_at,
+  };
+}
+
+function rowToContact(r: Row): EntityContact {
+  return {
+    id: r.id,
+    entityId: r.entity_id,
+    name: r.name ?? null,
+    role: r.role ?? null,
+    phone: r.phone ?? null,
+    email: r.email ?? null,
+    label: r.label ?? null,
+    source: r.source ?? null,
+    metadata: r.metadata ?? {},
     createdAt: r.created_at,
   };
 }

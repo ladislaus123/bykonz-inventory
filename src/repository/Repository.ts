@@ -11,9 +11,11 @@ import type {
   ConversationStateName,
   Embedding,
   Entity,
+  EntityContact,
   EntityMatch,
   EntityMedia,
   EntityStatus,
+  NewEntityContact,
   Job,
   JobStatus,
   MediaMatch,
@@ -60,6 +62,10 @@ export interface Repository {
   deleteMedia(id: UUID): Promise<void>;
   /** Cosine similarity search over media embeddings via the match_entity_media RPC. */
   searchMedia(embedding: Embedding, opts?: VectorSearchOptions): Promise<MediaMatch[]>;
+
+  /* ---------------- entity_contacts (extra contacts per business) ---------------- */
+  createContact(input: NewEntityContact): Promise<EntityContact>;
+  listContactsByEntity(entityId: UUID): Promise<EntityContact[]>;
 
   /* ---------------- conversation state machine ---------------- */
   /** Current state for a user; returns a transient 'idle' default if no row exists yet. */

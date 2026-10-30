@@ -65,6 +65,23 @@ const TOOLS: ToolDef[] = [
           website: { type: 'string' },
           address: { type: 'string' },
           confidence: { type: 'number', description: '0..1 confidence in the extraction.' },
+          contacts: {
+            type: 'array',
+            description:
+              'ALL contacts found (people, phones, e-mails, departments). Include every ' +
+              'distinct contact — a card may list more than one. phone/email above are the ' +
+              'primary/main contact; put every contact (including the primary) here too.',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'Contact person name, if any.' },
+                role: { type: 'string', description: 'Job title / department.' },
+                phone: { type: 'string' },
+                email: { type: 'string' },
+                label: { type: 'string', description: 'e.g. comercial, suporte, whatsapp.' },
+              },
+            },
+          },
           metadata: {
             type: 'object',
             description: 'Any extra structured data (social links, hours, people, etc.).',
@@ -93,6 +110,7 @@ const SYSTEM_PROMPT = `Você é um assistente que cadastra empresas a partir de 
 Quando houver mais de uma imagem, elas podem ser a frente e o verso do mesmo cartão (ou fotos complementares do mesmo negócio): analise todas e combine as informações em um único cadastro.
 Fluxo obrigatório:
 1. Analise a entrada (imagem(ns) ou texto) e extraia/normalize o máximo de informação (nome, telefone, e-mail, site, endereço, segmento).
+   Um negócio pode ter MAIS DE UM contato (várias pessoas, telefones, e-mails, departamentos): identifique TODOS e inclua-os no array contacts de save_business.
 2. Use a ferramenta search_web para confirmar e enriquecer os dados na internet quando útil.
 3. Chame save_business UMA vez com os dados consolidados e normalizados. O campo description deve ser um parágrafo rico em português, pois será usado para busca semântica.
 4. Chame finish com um resumo curto em português para o usuário confirmar.
@@ -250,6 +268,81 @@ export class EnrichmentAgent {
       metadata: isRecord(args.metadata) ? args.metadata : undefined,
     };
     await this.repo.updateEntity(entityId, pruneUndefined(patch));
+
+    // Persist additional contacts, if the model found any (a card may list more
+    // than one). We skip a contact that merely repeats the entity's primary
+    // phone/email with no extra information.
+    const contacts = normalizeContacts(args.contacts);
+    for (const c of contacts) {
+      const isPrimaryDup =
+        !c.name && !c.role && !c.label && c.phone === patch.phone && c.email === patch.email;
+      if (isPrimaryDup) continue;
+      await this.repo.createContact({ entityId, source: 'business_card', ...c });
+    }
+  }
+
+  /**
+   * Extract one or more contacts from a free-text (or voice-transcribed) message
+   * the user sent to attach to an EXISTING business. Single LLM call, strict JSON
+   * out — no tools, no web search. Returns [] when nothing contact-like is found.
+   */
+  async extractContacts(text: string): Promise<ContactInput[]> {
+    if (!text.trim()) return [];
+    const res = await this.chat.complete({
+      model: this.cfg.model,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Extraia os contatos do texto do usuário (pessoas, telefones, e-mails, cargos, ' +
+            'departamentos). Pode haver mais de um contato. Responda APENAS com um array JSON; ' +
+            'cada item: {"name"?, "role"?, "phone"?, "email"?, "label"?}. Normalize telefones e ' +
+            'e-mails. Se não houver nenhum contato, responda [].',
+        },
+        { role: 'user', content: text.trim() },
+      ],
+    });
+    const raw = typeof res.content === 'string' ? res.content : '';
+    return normalizeContacts(parseJsonArray(raw));
+  }
+}
+
+/** A contact as accepted by the repository (minus entityId/source). */
+export interface ContactInput {
+  name?: string;
+  role?: string;
+  phone?: string;
+  email?: string;
+  label?: string;
+}
+
+/** Coerce arbitrary model output into clean ContactInput[] (drops empty ones). */
+function normalizeContacts(value: unknown): ContactInput[] {
+  if (!Array.isArray(value)) return [];
+  const out: ContactInput[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const c: ContactInput = {
+      name: str(item.name),
+      role: str(item.role),
+      phone: str(item.phone),
+      email: str(item.email),
+      label: str(item.label),
+    };
+    if (c.name || c.role || c.phone || c.email || c.label) out.push(c);
+  }
+  return out;
+}
+
+/** Pull the first JSON array out of a model reply; [] on failure. */
+function parseJsonArray(text: string): unknown {
+  const m = text.match(/\[[\s\S]*\]/);
+  if (!m) return [];
+  try {
+    return JSON.parse(m[0]);
+  } catch {
+    return [];
   }
 }
 

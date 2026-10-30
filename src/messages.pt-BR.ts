@@ -56,11 +56,13 @@ export const ptBR = {
   menu:
     'O que você deseja fazer?\n\n' +
     '*1* — Adicionar um negócio ➕\n' +
-    '*2* — Consultar negócios 🔎\n\n' +
-    'Responda com *1* ou *2*. (Você também pode enviar a foto de um cartão a qualquer momento.)',
+    '*2* — Consultar negócios 🔎\n' +
+    '*3* — Adicionar um contato a um negócio 👤\n\n' +
+    'Responda com *1*, *2* ou *3*. (Você também pode enviar a foto de um cartão — ou ' +
+    'um áudio — a qualquer momento.)',
 
   menuNotUnderstood:
-    'Não entendi a opção. Responda com *1* para *Adicionar* ou *2* para *Consultar*.',
+    'Não entendi a opção. Responda com *1* (Adicionar), *2* (Consultar) ou *3* (Adicionar contato).',
 
   addPrompt:
     'Certo! ➕ Descreva o negócio em *texto* — nome e qualquer informação relevante ' +
@@ -115,4 +117,65 @@ export const ptBR = {
     if (contacts.length) lines.push(`\n${contacts.join('\n')}`);
     return lines.join('\n');
   },
+
+  /** Extra contacts block, shown after a Consultar result when a business has them. */
+  consultContacts: (
+    contacts: Array<{
+      name?: string | null;
+      role?: string | null;
+      phone?: string | null;
+      email?: string | null;
+      label?: string | null;
+    }>,
+  ) => {
+    const lines = ['👥 *Outros contatos:*'];
+    for (const c of contacts) {
+      const title = [c.name, c.role].filter(Boolean).join(' — ') || c.label || 'Contato';
+      const bits: string[] = [];
+      if (c.phone) bits.push(`📞 ${c.phone}`);
+      if (c.email) bits.push(`✉️ ${c.email}`);
+      const detail = bits.length ? ` (${bits.join(', ')})` : '';
+      lines.push(`• ${title}${detail}`);
+    }
+    return lines.join('\n');
+  },
+
+  /* ---- Adicionar contato ---- */
+
+  contactFindPrompt:
+    'A qual negócio você quer adicionar um contato? 👤 Descreva o negócio (nome ou segmento) ' +
+    'que eu localizo para você.',
+
+  contactNotFound:
+    'Não encontrei um negócio parecido. 😕 Tente descrever de outro jeito, ou cadastre o ' +
+    'negócio primeiro pelo menu (*oi* → *1*).',
+
+  contactFoundAsk: (name: string) =>
+    `Encontrei *${name}*. 👤 Agora me envie os dados do novo contato — nome, cargo, telefone ` +
+    'e/ou e-mail. Pode escrever em texto ou mandar um *áudio*.',
+
+  contactNeedDetails:
+    'Me envie os dados do contato em *texto* ou *áudio* (nome, cargo, telefone, e-mail).',
+
+  contactAnalyzing: 'Anotado! 🔎 Estou identificando os dados do contato…',
+
+  contactNone:
+    'Não consegui identificar um contato na sua mensagem. 😕 Tente novamente informando nome, ' +
+    'telefone e/ou e-mail.',
+
+  contactSaved: (count: number, name: string) =>
+    count === 1
+      ? `Pronto! ✅ Adicionei 1 contato ao negócio *${name}*.`
+      : `Pronto! ✅ Adicionei ${count} contatos ao negócio *${name}*.`,
+
+  /* ---- voz (Deepgram) ---- */
+
+  voiceUnavailable:
+    'No momento não consigo processar áudios. 🙊 Por favor, escreva sua mensagem em *texto*.',
+
+  voiceNotUnderstood:
+    'Não consegui entender o áudio. 🙉 Tente gravar novamente ou escreva em *texto*.',
+
+  /** Echo of what we transcribed, so the user can see what was understood. */
+  voiceHeard: (transcript: string) => `🎤 Entendi: _"${transcript}"_`,
 } as const;

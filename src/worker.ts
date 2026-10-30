@@ -20,7 +20,12 @@ import type { Channel } from './transport/MessageTransport.js';
 import type { Job, JobType } from './types/domain.js';
 
 /** Job kinds this worker knows how to run; others are left for future workers. */
-const HANDLED: ReadonlySet<JobType> = new Set<JobType>(['extract_card', 'enrich_text', 'embed_media']);
+const HANDLED: ReadonlySet<JobType> = new Set<JobType>([
+  'extract_card',
+  'enrich_text',
+  'embed_media',
+  'add_contact',
+]);
 
 export class Worker {
   private timer: NodeJS.Timeout | null = null;
@@ -75,6 +80,9 @@ export class Worker {
           break;
         case 'embed_media':
           await this.runMediaEmbedding(job);
+          break;
+        case 'add_contact':
+          await this.runAddContact(job);
           break;
         default:
           throw new Error(`worker cannot handle job type ${job.job}`);
@@ -149,6 +157,30 @@ export class Worker {
     await this.repo.setMediaEmbedding(media.id, vec, this.embeddings.model);
     await this.repo.markJobDone(job.id, { mediaId: media.id, dims: vec.length });
     log('worker', `job ${job.id} done: embedded media ${media.id} (${vec.length} dims)`);
+  }
+
+  /** Adicionar contato: extract contact(s) from free text/voice and attach them. */
+  private async runAddContact(job: Job): Promise<void> {
+    if (!job.entityId) throw new Error('add_contact job missing entityId');
+    const text = String(job.payload.text ?? '');
+    const chatId = String(job.payload.chatId ?? '');
+    const channel: Channel = job.payload.channel === 'telegram' ? 'telegram' : 'whatsapp';
+    const entityName = String(job.payload.entityName ?? '') || (await this.entityName(job.entityId));
+
+    const contacts = await this.agent.extractContacts(text);
+    for (const c of contacts) {
+      await this.repo.createContact({ entityId: job.entityId, source: 'manual', ...c });
+    }
+    log('worker', `job ${job.id}: added ${contacts.length} contact(s) to entity ${job.entityId}`);
+
+    if (chatId) await this.flow.announceContactsSaved(chatId, channel, contacts.length, entityName);
+    await this.repo.markJobDone(job.id, { contacts: contacts.length });
+  }
+
+  /** Best-effort lookup of an entity's name for the confirmation message. */
+  private async entityName(entityId: string): Promise<string> {
+    const entity = await this.repo.getEntityById(entityId).catch(() => null);
+    return entity?.name ?? 'negócio';
   }
 
   /** Shared: ask the user to confirm the proposed entity (Aceitar / Recusar). */

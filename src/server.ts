@@ -18,6 +18,7 @@ import { createStorage } from './storage/index.js';
 import { TELEGRAM_WEBHOOK_PATH, TelegramTransport } from './transport/TelegramTransport.js';
 import { TransportRouter } from './transport/TransportRouter.js';
 import { WahaTransport } from './transport/WahaTransport.js';
+import { DeepgramClient } from './voice/DeepgramClient.js';
 import { Worker } from './worker.js';
 
 async function main() {
@@ -46,7 +47,16 @@ async function main() {
   const storage = await createStorage();
   // Shared OpenRouter chat client: Consultar reranking + the enrichment agent.
   const chat = new OpenRouterChat(config.openrouter.apiKey);
-  const flow = new WhatsAppFlow(transports, repo, embeddings, storage, chat, config.agent.model);
+  // Voice is optional: only enabled when a Deepgram key is configured.
+  const voice = config.deepgram.apiKey
+    ? new DeepgramClient({
+        apiKey: config.deepgram.apiKey,
+        model: config.deepgram.model,
+        language: config.deepgram.language,
+      })
+    : undefined;
+  log('server', `voice transcription ${voice ? 'enabled (Deepgram)' : 'disabled (no DEEPGRAM_API_KEY)'}`);
+  const flow = new WhatsAppFlow(transports, repo, embeddings, storage, chat, config.agent.model, voice);
 
   for (const transport of transports.all()) {
     transport.onMessage(flow.handle);

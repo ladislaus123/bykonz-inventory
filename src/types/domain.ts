@@ -16,7 +16,8 @@ export type JobType =
   | 'extract_card'
   | 'enrich_entity'
   | 'enrich_text'
-  | 'embed_media';
+  | 'embed_media'
+  | 'add_contact';
 
 /** Where a user currently is in the WhatsApp conversation (see 003_conversation_state.sql). */
 export type ConversationStateName =
@@ -25,6 +26,8 @@ export type ConversationStateName =
   | 'card_collecting'
   | 'add_collecting'
   | 'consult_await'
+  | 'contact_find'
+  | 'contact_await'
   | 'awaiting_decision';
 
 /** A pgvector embedding is transported as a plain number[] (length = EMBEDDING_DIMENSIONS). */
@@ -76,6 +79,20 @@ export interface EntityMedia {
   width: number | null;
   height: number | null;
   embeddingModel: string | null;
+  createdAt: string;
+}
+
+/** One contact belonging to a business (beyond the entity's primary fields). */
+export interface EntityContact {
+  id: UUID;
+  entityId: UUID;
+  name: string | null;
+  role: string | null;
+  phone: string | null;
+  email: string | null;
+  label: string | null;
+  source: string | null;
+  metadata: Record<string, unknown>;
   createdAt: string;
 }
 
@@ -142,6 +159,17 @@ export type NewEntityMedia = {
   waMessageId?: string | null;
   width?: number | null;
   height?: number | null;
+};
+
+export type NewEntityContact = {
+  entityId: UUID;
+  name?: string | null;
+  role?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  label?: string | null;
+  source?: string | null;
+  metadata?: Record<string, unknown>;
 };
 
 export type NewJob = {

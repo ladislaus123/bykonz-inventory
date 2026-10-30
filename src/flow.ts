@@ -34,6 +34,7 @@ import type { Storage } from './storage/Storage.js';
 import type { EntityMatch } from './types/domain.js';
 import type { Channel, IncomingMessage, MessageTransport } from './transport/MessageTransport.js';
 import type { TransportRouter } from './transport/TransportRouter.js';
+import type { VoiceTranscriber } from './voice/DeepgramClient.js';
 
 /** Consultar tuning. */
 const CONSULT_MAX_RESULTS = 3; // businesses shown to the user
@@ -52,6 +53,8 @@ export class WhatsAppFlow {
     private readonly storage: Storage,
     private readonly chat: OpenRouterChat,
     private readonly rerankModel: string,
+    /** Optional speech-to-text; when absent, voice messages ask the user to type. */
+    private readonly voice?: VoiceTranscriber,
   ) {}
 
   /** Wire this as every transport's message handler. */
@@ -66,6 +69,13 @@ export class WhatsAppFlow {
       });
       await this.repo.updateUser(user.id, { lastSeenAt: new Date().toISOString() });
       await transport.markSeen?.(msg);
+
+      // Voice: transcribe audio to text, then route exactly like a typed message.
+      if (msg.type === 'audio') {
+        const transcript = await this.transcribeVoice(msg, transport);
+        if (!transcript) return; // transcribeVoice already messaged the user
+        msg = { ...msg, type: 'text', text: transcript, media: undefined };
+      }
 
       const text = (msg.text ?? '').trim();
       const hasDownloadableMedia = Boolean(msg.media?.url || msg.media?.base64);
@@ -123,6 +133,22 @@ export class WhatsAppFlow {
           }
           return;
 
+        case 'contact_find':
+          if (hasDownloadableMedia) {
+            await transport.sendText(msg.chatId, ptBR.contactFindPrompt);
+          } else {
+            await this.onContactFind(user.id, msg.chatId, text, transport);
+          }
+          return;
+
+        case 'contact_await':
+          if (hasDownloadableMedia) {
+            await transport.sendText(msg.chatId, ptBR.contactNeedDetails);
+          } else {
+            await this.onContactProvide(user.id, msg.chatId, text, state.context, transport);
+          }
+          return;
+
         case 'awaiting_decision': {
           const decision = parseDecision(text);
           if (decision) {
@@ -172,6 +198,9 @@ export class WhatsAppFlow {
     } else if (choice === 'consult') {
       await this.repo.setConversationState(userId, 'consult_await', {});
       await transport.sendText(chatId, ptBR.consultPrompt);
+    } else if (choice === 'contact') {
+      await this.repo.setConversationState(userId, 'contact_find', {});
+      await transport.sendText(chatId, ptBR.contactFindPrompt);
     } else {
       await transport.sendText(chatId, ptBR.menuNotUnderstood);
     }
@@ -275,18 +304,7 @@ export class WhatsAppFlow {
     await transport.sendText(chatId, ptBR.consultSearching);
     await transport.sendTyping?.(chatId, true);
 
-    // Search runs across ALL confirmed businesses (shared directory), not just
-    // this user's own entries. Pull a wider candidate set, then rerank it down
-    // to the ones that actually satisfy the query (embedding similarity alone
-    // has a high baseline, so unrelated businesses still score 0.5+).
-    const vec = await this.embeddings.embedText(query);
-    const candidates = await this.repo.searchEntities(vec, {
-      status: 'confirmed',
-      matchCount: CONSULT_CANDIDATES,
-      similarityThreshold: CONSULT_MIN_SIMILARITY,
-    });
-    const matches = (await this.rerankMatches(query, candidates)).slice(0, CONSULT_MAX_RESULTS);
-    log('flow', `consultar: query="${query}" -> ${candidates.length} candidate(s) -> ${matches.length} match(es)`);
+    const matches = (await this.searchConfirmed(query)).slice(0, CONSULT_MAX_RESULTS);
 
     // Back to idle regardless of outcome; a new "oi" reopens the menu.
     await this.repo.setConversationState(userId, 'idle', {});
@@ -314,8 +332,28 @@ export class WhatsAppFlow {
           similarity: match.similarity,
         }),
       );
+      // Extra contacts (beyond the entity's primary fields), if any.
+      const contacts = await this.repo.listContactsByEntity(entity.id);
+      if (contacts.length) await transport.sendText(chatId, ptBR.consultContacts(contacts));
       await this.sendEntityMedia(chatId, entity.id, entity.name, transport);
     }
+  }
+
+  /**
+   * Shared retrieval: embed the query, pull a wide candidate set across ALL
+   * confirmed businesses (shared directory), then rerank down to the ones that
+   * actually satisfy the query. Used by Consultar and by "Adicionar contato".
+   */
+  private async searchConfirmed(query: string): Promise<EntityMatch[]> {
+    const vec = await this.embeddings.embedText(query);
+    const candidates = await this.repo.searchEntities(vec, {
+      status: 'confirmed',
+      matchCount: CONSULT_CANDIDATES,
+      similarityThreshold: CONSULT_MIN_SIMILARITY,
+    });
+    const matches = await this.rerankMatches(query, candidates);
+    log('flow', `search: query="${query}" -> ${candidates.length} candidate(s) -> ${matches.length} match(es)`);
+    return matches;
   }
 
   /**
@@ -390,6 +428,117 @@ export class WhatsAppFlow {
       } catch (err) {
         logErr('flow', `consultar: failed to send media ${item.id}`, err);
       }
+    }
+  }
+
+  /* ===================== Adicionar contato (to an existing business) ===================== */
+
+  /** contact_find: resolve the described business and move to contact_await. */
+  private async onContactFind(
+    userId: string,
+    chatId: string,
+    query: string,
+    transport: MessageTransport,
+  ): Promise<void> {
+    if (!query) {
+      await transport.sendText(chatId, ptBR.contactFindPrompt);
+      return;
+    }
+    await transport.sendText(chatId, ptBR.consultSearching);
+    await transport.sendTyping?.(chatId, true);
+    const [best] = await this.searchConfirmed(query);
+    await transport.sendTyping?.(chatId, false);
+
+    if (!best) {
+      // Stay in contact_find so the user can rephrase.
+      await transport.sendText(chatId, ptBR.contactNotFound);
+      return;
+    }
+    await this.repo.setConversationState(userId, 'contact_await', {
+      entityId: best.id,
+      entityName: best.name,
+      chatId,
+    });
+    await transport.sendText(chatId, ptBR.contactFoundAsk(best.name));
+  }
+
+  /** contact_await: enqueue contact extraction from the user's text/voice. */
+  private async onContactProvide(
+    userId: string,
+    chatId: string,
+    text: string,
+    context: Record<string, unknown>,
+    transport: MessageTransport,
+  ): Promise<void> {
+    const entityId = typeof context.entityId === 'string' ? context.entityId : null;
+    if (!entityId) {
+      // Context lost — restart the contact flow.
+      await this.repo.setConversationState(userId, 'contact_find', {});
+      await transport.sendText(chatId, ptBR.contactFindPrompt);
+      return;
+    }
+    if (!text) {
+      await transport.sendText(chatId, ptBR.contactNeedDetails);
+      return;
+    }
+
+    await transport.sendText(chatId, ptBR.contactAnalyzing);
+    await transport.sendTyping?.(chatId, true);
+    const job = await this.repo.enqueueJob({
+      userId,
+      job: 'add_contact',
+      entityId,
+      payload: { chatId, channel: transport.channel, text, entityName: context.entityName ?? '' },
+    });
+    log('flow', `contato: add_contact job ${job.id} enqueued for entity ${entityId}`);
+    // Back to idle; the worker messages the result when done.
+    await this.repo.setConversationState(userId, 'idle', {});
+    await transport.sendTyping?.(chatId, false);
+  }
+
+  /** Called by the worker after contacts are extracted + saved. */
+  async announceContactsSaved(
+    chatId: string,
+    channel: Channel,
+    count: number,
+    entityName: string,
+  ): Promise<void> {
+    const transport = this.transports.get(channel);
+    if (count === 0) {
+      await transport.sendText(chatId, ptBR.contactNone);
+      return;
+    }
+    await transport.sendText(chatId, ptBR.contactSaved(count, entityName));
+  }
+
+  /* ===================== voice ===================== */
+
+  /**
+   * Transcribe an inbound audio message to text. Returns the transcript, or null
+   * when voice is unavailable / unintelligible (in which case the user has
+   * already been told how to proceed). Echoes what was understood on success.
+   */
+  private async transcribeVoice(msg: IncomingMessage, transport: MessageTransport): Promise<string | null> {
+    if (!this.voice) {
+      await transport.sendText(msg.chatId, ptBR.voiceUnavailable);
+      return null;
+    }
+    try {
+      await transport.sendTyping?.(msg.chatId, true);
+      const { data, mimeType } = await transport.downloadMedia(msg);
+      const transcript = await this.voice.transcribe(data, mimeType);
+      await transport.sendTyping?.(msg.chatId, false);
+      if (!transcript) {
+        await transport.sendText(msg.chatId, ptBR.voiceNotUnderstood);
+        return null;
+      }
+      await transport.sendText(msg.chatId, ptBR.voiceHeard(transcript));
+      return transcript;
+    } catch (err) {
+      logErr('flow', `voice transcription failed for ${msg.id}`, err);
+      await transport.sendTyping?.(msg.chatId, false).catch(() => undefined);
+      await transport.sendText(msg.chatId, ptBR.voiceNotUnderstood).catch(() => undefined);
+      return null;
     }
   }
 
@@ -591,8 +740,10 @@ function isFinishWord(text: string): boolean {
   return /^(pronto|finalizar|concluir|terminar|fim|ok)$/i.test(text.trim());
 }
 
-function parseMenuChoice(text: string): 'add' | 'consult' | null {
+function parseMenuChoice(text: string): 'add' | 'consult' | 'contact' | null {
   const t = text.trim().toLowerCase();
+  // Check "contato" before "consultar" so "con…" variants don't collide.
+  if (/^(3|contato|adicionar contato)\b/.test(t)) return 'contact';
   if (/^(1|adicionar|add|cadastrar)\b/.test(t)) return 'add';
   if (/^(2|consultar|buscar|procurar|pesquisar)\b/.test(t)) return 'consult';
   return null;

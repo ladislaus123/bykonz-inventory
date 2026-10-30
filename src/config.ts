@@ -38,6 +38,13 @@ export const config = {
     enabled: (process.env.WORKER_ENABLED ?? 'true') === 'true',
     pollMs: Number(process.env.WORKER_POLL_MS ?? '3000'),
   },
+  // Voice transcription (Deepgram). Leave the key blank to disable voice: the
+  // flow then asks users to type instead of sending audio.
+  deepgram: {
+    apiKey: process.env.DEEPGRAM_API_KEY ?? '',
+    model: process.env.DEEPGRAM_MODEL ?? 'nova-2',
+    language: process.env.DEEPGRAM_LANGUAGE ?? 'pt',
+  },
   // Which messaging backend(s) drive the flow. Comma-separated to run more than
   // one at once, e.g. TRANSPORT_DRIVER=waha,telegram — WhatsApp and Telegram are
   // then served simultaneously and each user is answered on their own channel.
