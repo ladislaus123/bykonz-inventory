@@ -15,7 +15,7 @@ import { EmbeddingClient } from './embeddings/EmbeddingClient.js';
 import { WhatsAppFlow } from './flow.js';
 import { SupabaseRepository } from './repository/SupabaseRepository.js';
 import { createStorage } from './storage/index.js';
-import { TelegramTransport } from './transport/TelegramTransport.js';
+import { TELEGRAM_WEBHOOK_PATH, TelegramTransport } from './transport/TelegramTransport.js';
 import { TransportRouter } from './transport/TransportRouter.js';
 import { WahaTransport } from './transport/WahaTransport.js';
 import { Worker } from './worker.js';
@@ -104,12 +104,12 @@ async function main() {
   if (telegramTransport) {
     const tg = telegramTransport;
 
-    app.get('/webhook/telegram', (_req, res) => {
-      log('webhook', 'GET /webhook/telegram (reachability check)');
+    app.get(TELEGRAM_WEBHOOK_PATH, (_req, res) => {
+      log('webhook', `GET ${TELEGRAM_WEBHOOK_PATH} (reachability check)`);
       res.json({ ok: true, hint: 'POST Telegram updates here' });
     });
 
-    app.post('/webhook/telegram', async (req, res) => {
+    app.post(TELEGRAM_WEBHOOK_PATH, async (req, res) => {
       // Verify the secret Telegram echoes back, if one is configured.
       if (tg.webhookSecret) {
         const got = req.header('x-telegram-bot-api-secret-token');

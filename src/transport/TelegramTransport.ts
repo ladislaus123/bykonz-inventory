@@ -24,6 +24,13 @@ import type {
   SendImageOptions,
 } from './MessageTransport.js';
 
+/**
+ * The path Telegram webhook updates are served at. The server mounts its route
+ * here and the transport forces any configured TELEGRAM_WEBHOOK_URL onto this
+ * path, so a bare-origin env value (…onrender.com) can't 404 the webhook.
+ */
+export const TELEGRAM_WEBHOOK_PATH = '/webhook/telegram';
+
 export interface TelegramConfig {
   botToken: string;
   /** Long-poll timeout in seconds (Telegram holds the request open this long). */
@@ -86,7 +93,7 @@ export class TelegramTransport implements MessageTransport {
     if (!cfg.botToken) throw new Error('TelegramTransport requires a bot token');
     this.token = cfg.botToken;
     this.pollTimeout = cfg.pollTimeout ?? 30;
-    this.webhookUrl = cfg.webhookUrl?.trim() ?? '';
+    this.webhookUrl = normalizeWebhookUrl(cfg.webhookUrl);
     this.webhookSecret = cfg.webhookSecret?.trim() ?? '';
     const base = (cfg.apiBaseUrl ?? 'https://api.telegram.org').replace(/\/+$/, '');
     this.apiBase = `${base}/bot${this.token}`;
@@ -353,4 +360,22 @@ export class TelegramTransport implements MessageTransport {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Force any configured webhook URL onto TELEGRAM_WEBHOOK_PATH, keeping only its
+ * origin. This makes `https://host.com`, `https://host.com/`, and
+ * `https://host.com/webhook/telegram` all resolve to the one path the server
+ * actually serves — so the common "bare origin" mistake can't cause a 404.
+ */
+function normalizeWebhookUrl(raw: string | undefined): string {
+  const trimmed = raw?.trim();
+  if (!trimmed) return '';
+  try {
+    const u = new URL(trimmed);
+    return `${u.origin}${TELEGRAM_WEBHOOK_PATH}`;
+  } catch {
+    log('telegram', `ignoring invalid TELEGRAM_WEBHOOK_URL "${trimmed}" (not a URL); using polling`);
+    return '';
+  }
 }

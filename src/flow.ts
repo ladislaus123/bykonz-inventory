@@ -309,11 +309,13 @@ export class WhatsAppFlow {
   }
 
   /**
-   * Rerank vector candidates with the LLM so only businesses that genuinely
-   * satisfy the query survive (e.g. "restaurant" shouldn't return an offroad
-   * shop just because its description scored 0.56). The model returns the
-   * relevant candidate numbers, most relevant first; irrelevant ones are
-   * dropped. Falls back to a relative-similarity gap if the call fails.
+   * Rerank vector candidates with the LLM to fix embedding similarity's high,
+   * compressed baseline. The goal is precision WITHOUT killing recall: keep
+   * businesses that directly match AND those in a related/adjacent domain
+   * (e.g. a query for "calças" should surface a "calçados"/clothing store — all
+   * vestuário), excluding only the clearly-unrelated (a restaurant query must
+   * not return an offroad-parts shop). The model returns candidate numbers,
+   * most relevant first; falls back to a similarity gap if the call fails.
    */
   private async rerankMatches(query: string, candidates: EntityMatch[]): Promise<EntityMatch[]> {
     if (candidates.length <= 1) return candidates;
@@ -333,17 +335,23 @@ export class WhatsAppFlow {
           {
             role: 'system',
             content:
-              'Você seleciona quais negócios atendem à busca do usuário. ' +
-              'Responda APENAS com um array JSON com os números dos negócios realmente relevantes, ' +
-              'do mais para o menos relevante (ex.: [2,1]). Se nenhum servir, responda [].',
+              'Para cada negócio da lista (identificado pelo seu número), avalie a relevância para a ' +
+              'busca do usuário e atribua uma nota:\n' +
+              '2 = atende diretamente à busca;\n' +
+              '1 = relacionado ou adjacente — mesmo universo ou ramo amplo (ex.: "calças" se relaciona ' +
+              'com "calçados" e roupas, pois tudo é vestuário; "pizza" se relaciona com restaurantes);\n' +
+              '0 = sem relação com a busca.\n' +
+              'Responda APENAS com um objeto JSON que mapeia o número de cada negócio para sua nota. ' +
+              'Exemplo para 3 negócios: {"1":0,"2":2,"3":1}.',
           },
           { role: 'user', content: `Busca do usuário: "${query}"\n\nNegócios:\n${list}` },
         ],
       });
 
       const raw = typeof res.content === 'string' ? res.content : '';
-      const picked = parseIndexArray(raw, candidates.length);
+      const picked = parseScoreMap(raw, candidates.length);
       if (picked === null) throw new Error('unparseable rerank response');
+      // picked holds candidate numbers scored >= 1, best score first.
       return picked.map((n) => candidates[n - 1]!);
     } catch (err) {
       logErr('flow', 'consultar: rerank failed, falling back to similarity gap', err);
@@ -512,30 +520,32 @@ function parseMenuChoice(text: string): 'add' | 'consult' | null {
 }
 
 /**
- * Parse the rerank model's reply into valid 1-based indices (deduped, in order).
- * Returns null if no JSON array is found (so the caller can fall back); an empty
- * array is a valid "nothing matched" answer.
+ * Parse the rerank model's `{itemNumber: score}` reply into the candidate
+ * numbers scored >= 1 (relevant), best score first, ties keeping vector order.
+ * Returns null if no JSON object is found (caller falls back); an empty array is
+ * a valid "nothing relevant" answer.
  */
-function parseIndexArray(text: string, max: number): number[] | null {
-  const m = text.match(/\[[^\]]*\]/);
+function parseScoreMap(text: string, max: number): number[] | null {
+  const m = text.match(/\{[^}]*\}/);
   if (!m) return null;
-  let arr: unknown;
+  let obj: unknown;
   try {
-    arr = JSON.parse(m[0]);
+    obj = JSON.parse(m[0]);
   } catch {
     return null;
   }
-  if (!Array.isArray(arr)) return null;
-  const seen = new Set<number>();
-  const out: number[] = [];
-  for (const v of arr) {
-    const n = typeof v === 'number' ? v : Number(v);
-    if (Number.isInteger(n) && n >= 1 && n <= max && !seen.has(n)) {
-      seen.add(n);
-      out.push(n);
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return null;
+  const scored: Array<{ n: number; s: number }> = [];
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    const n = Number(k);
+    const s = typeof v === 'number' ? v : Number(v);
+    if (Number.isInteger(n) && n >= 1 && n <= max && Number.isFinite(s) && s >= 1) {
+      scored.push({ n, s });
     }
   }
-  return out;
+  // Higher score first; preserve the candidates' (similarity) order within a tie.
+  scored.sort((a, b) => b.s - a.s || a.n - b.n);
+  return scored.map((x) => x.n);
 }
 
 function parseDecision(text: string): 'accept' | 'reject' | null {
