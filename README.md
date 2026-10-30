@@ -47,7 +47,7 @@ serves the Aceitar/Recusar step for both.
 
 | # | Deliverable | File |
 |---|-------------|------|
-| 1 | `MessageTransport` interface + WAHA impl | `src/transport/MessageTransport.ts`, `src/transport/WahaTransport.ts` |
+| 1 | `MessageTransport` interface + WAHA & Telegram impls | `src/transport/MessageTransport.ts`, `src/transport/WahaTransport.ts`, `src/transport/TelegramTransport.ts` |
 | 2 | `Repository` interface (CRUD + search + jobs) + Supabase impl | `src/repository/Repository.ts`, `src/repository/SupabaseRepository.ts` |
 | 3 | Schema additions (analysis of `001_init.sql`) | `002_enrich_schema.sql`, `003_conversation_state.sql` |
 | 4 | Embedding client (gemini-embedding-2 via OpenRouter) | `src/embeddings/EmbeddingClient.ts` |
@@ -55,6 +55,21 @@ serves the Aceitar/Recusar step for both.
 Everything depends on the **interfaces**, not the implementations, so WAHA can be
 swapped for the official Cloud API and Supabase for any Postgres without touching
 the flow.
+
+### Channels (WhatsApp + Telegram, simultaneously)
+
+`TRANSPORT_DRIVER` selects the backend(s); comma-separate to run several at once:
+
+```
+TRANSPORT_DRIVER=waha,telegram   # both live at the same time
+```
+
+Each inbound `IncomingMessage` carries its `channel`, and a `TransportRouter`
+sends every reply back out on that same channel — so a user on Telegram is driven
+entirely through Telegram and a user on WhatsApp through WhatsApp, independently.
+The async worker records the channel on the job and routes its proposal back the
+same way. WAHA is webhook-driven (`POST /webhook/waha`); Telegram uses a
+self-contained long-polling loop and needs no public URL.
 
 ## Embedding dimensions — the decision
 

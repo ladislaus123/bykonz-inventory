@@ -16,6 +16,7 @@ import type { WhatsAppFlow } from './flow.js';
 import { log, logErr } from './log.js';
 import type { Repository } from './repository/Repository.js';
 import type { Storage } from './storage/Storage.js';
+import type { Channel } from './transport/MessageTransport.js';
 import type { Job, JobType } from './types/domain.js';
 
 /** Job kinds this worker knows how to run; others are left for future workers. */
@@ -144,7 +145,10 @@ export class Worker {
       logErr('worker', `job ${job.id}: no chatId in payload, skipping proposal`);
       return;
     }
-    await this.flow.presentProposal(job.userId, chatId, job.entityId!, result);
-    log('worker', `job ${job.id}: proposal sent to ${chatId}`);
+    // Route the proposal back on the channel the request came in on (older jobs
+    // predating multi-channel default to WhatsApp).
+    const channel: Channel = job.payload.channel === 'telegram' ? 'telegram' : 'whatsapp';
+    await this.flow.presentProposal(job.userId, chatId, channel, job.entityId!, result);
+    log('worker', `job ${job.id}: proposal sent to ${chatId} on ${channel}`);
   }
 }

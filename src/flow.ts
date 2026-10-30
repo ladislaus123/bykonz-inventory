@@ -1,6 +1,12 @@
 /**
  * WhatsAppFlow — a DB-backed state machine driving the conversation.
  *
+ * Despite the name it is transport-agnostic and runs every configured channel
+ * (WhatsApp via WAHA and/or Telegram) at the same time: each inbound message
+ * carries its `channel`, and every reply is sent back out on the SAME channel
+ * via the TransportRouter. A user chatting on Telegram is driven through
+ * Telegram; a user on WhatsApp through WhatsApp — independently.
+ *
  * States live in the `conversation_states` table (003_conversation_state.sql);
  * each inbound message is routed by the user's current state:
  *
@@ -13,8 +19,6 @@
  *   consult_await     text              -> embedding search, send results, state=idle
  *   awaiting_decision "1"/"2"           -> confirm / reject the proposed entity
  *
- * "oi" / menu from any state resets to the menu (escape hatch).
- *
  * Heavy lifting (OCR / web enrichment / embedding) runs out of band in the
  * worker that drains the `jobs` table; this class only enqueues and messages.
  */
@@ -26,7 +30,8 @@ import { ptBR } from './messages.pt-BR.js';
 import type { EmbeddingClient } from './embeddings/EmbeddingClient.js';
 import type { Repository } from './repository/Repository.js';
 import type { Storage } from './storage/Storage.js';
-import type { IncomingMessage, MessageTransport } from './transport/MessageTransport.js';
+import type { Channel, IncomingMessage, MessageTransport } from './transport/MessageTransport.js';
+import type { TransportRouter } from './transport/TransportRouter.js';
 
 /** How many businesses (and images each) a Consultar reply shows. */
 const CONSULT_MAX_RESULTS = 3;
@@ -35,23 +40,24 @@ const CONSULT_MIN_SIMILARITY = 0.2;
 
 export class WhatsAppFlow {
   constructor(
-    private readonly transport: MessageTransport,
+    private readonly transports: TransportRouter,
     private readonly repo: Repository,
     private readonly embeddings: EmbeddingClient,
     private readonly storage: Storage,
   ) {}
 
-  /** Wire this as the transport's message handler. */
+  /** Wire this as every transport's message handler. */
   handle = async (msg: IncomingMessage): Promise<void> => {
+    const transport = this.transports.get(msg.channel);
     try {
-      log('flow', `handle message id=${msg.id} from=${msg.from} type=${msg.type}`);
+      log('flow', `handle message id=${msg.id} channel=${msg.channel} from=${msg.from} type=${msg.type}`);
       const user = await this.repo.upsertUserByWaId(msg.from, {
         name: msg.from,
         contact: msg.from,
         waId: msg.from,
       });
       await this.repo.updateUser(user.id, { lastSeenAt: new Date().toISOString() });
-      await this.transport.markSeen?.(msg);
+      await transport.markSeen?.(msg);
 
       const text = (msg.text ?? '').trim();
       const hasDownloadableMedia = Boolean(msg.media?.url || msg.media?.base64);
@@ -65,15 +71,15 @@ export class WhatsAppFlow {
 
       // Media was announced but we can't fetch the bytes (WAHA media download off).
       if (mediaSignalled && !hasDownloadableMedia) {
-        logErr('flow', `media present but not downloadable (type=${msg.type}); check WAHA media config`);
-        await this.transport.sendText(msg.chatId, ptBR.askForPhoto);
+        logErr('flow', `media present but not downloadable (type=${msg.type}); check transport media config`);
+        await transport.sendText(msg.chatId, ptBR.askForPhoto);
         return;
       }
 
       // Global escape hatch: a greeting always opens the menu.
       if (!hasDownloadableMedia && msg.type === 'text' && isGreeting(text)) {
         log('flow', 'greeting -> menu');
-        await this.showMenu(user.id, msg.chatId);
+        await this.showMenu(user.id, msg.chatId, transport);
         return;
       }
 
@@ -82,32 +88,32 @@ export class WhatsAppFlow {
 
       switch (state.state) {
         case 'menu':
-          if (hasDownloadableMedia) await this.onCardPhoto(msg, user.id);
-          else await this.onMenuChoice(user.id, msg.chatId, text);
+          if (hasDownloadableMedia) await this.onCardPhoto(msg, user.id, transport);
+          else await this.onMenuChoice(user.id, msg.chatId, text, transport);
           return;
 
         case 'add_collecting':
-          if (hasDownloadableMedia) await this.onAddMedia(msg, user.id, state.context);
-          else await this.onAddText(user.id, msg.chatId, text, state.context);
+          if (hasDownloadableMedia) await this.onAddMedia(msg, user.id, state.context, transport);
+          else await this.onAddText(user.id, msg.chatId, text, state.context, transport);
           return;
 
         case 'consult_await':
           if (hasDownloadableMedia) {
-            await this.transport.sendText(msg.chatId, ptBR.consultPrompt);
+            await transport.sendText(msg.chatId, ptBR.consultPrompt);
           } else {
-            await this.onConsultQuery(user.id, msg.chatId, text);
+            await this.onConsultQuery(user.id, msg.chatId, text, transport);
           }
           return;
 
         case 'awaiting_decision': {
           const decision = parseDecision(text);
           if (decision) {
-            await this.onDecision(user.id, msg.chatId, decision, state.context);
+            await this.onDecision(user.id, msg.chatId, decision, state.context, transport);
           } else if (hasDownloadableMedia) {
             // New card while a proposal was pending: start a fresh capture.
-            await this.onCardPhoto(msg, user.id);
+            await this.onCardPhoto(msg, user.id, transport);
           } else {
-            await this.transport.sendText(msg.chatId, ptBR.notUnderstood);
+            await transport.sendText(msg.chatId, ptBR.notUnderstood);
           }
           return;
         }
@@ -115,15 +121,15 @@ export class WhatsAppFlow {
         case 'idle':
         default:
           if (hasDownloadableMedia) {
-            await this.onCardPhoto(msg, user.id);
+            await this.onCardPhoto(msg, user.id, transport);
           } else {
-            await this.transport.sendText(msg.chatId, ptBR.idleHint);
+            await transport.sendText(msg.chatId, ptBR.idleHint);
           }
           return;
       }
     } catch (err) {
       logErr('flow', `handle failed for message ${msg.id}`, err);
-      await this.transport
+      await transport
         .sendText(msg.chatId, 'Ops, tive um problema ao processar sua mensagem. Tente novamente.')
         .catch(() => undefined);
     }
@@ -131,26 +137,31 @@ export class WhatsAppFlow {
 
   /* ===================== menu ===================== */
 
-  private async showMenu(userId: string, chatId: string): Promise<void> {
+  private async showMenu(userId: string, chatId: string, transport: MessageTransport): Promise<void> {
     await this.repo.setConversationState(userId, 'menu', {});
-    await this.transport.sendText(chatId, ptBR.menu);
+    await transport.sendText(chatId, ptBR.menu);
   }
 
-  private async onMenuChoice(userId: string, chatId: string, text: string): Promise<void> {
+  private async onMenuChoice(
+    userId: string,
+    chatId: string,
+    text: string,
+    transport: MessageTransport,
+  ): Promise<void> {
     const choice = parseMenuChoice(text);
     if (choice === 'add') {
-      await this.enterAdicionar(userId, chatId);
+      await this.enterAdicionar(userId, chatId, transport);
     } else if (choice === 'consult') {
       await this.repo.setConversationState(userId, 'consult_await', {});
-      await this.transport.sendText(chatId, ptBR.consultPrompt);
+      await transport.sendText(chatId, ptBR.consultPrompt);
     } else {
-      await this.transport.sendText(chatId, ptBR.menuNotUnderstood);
+      await transport.sendText(chatId, ptBR.menuNotUnderstood);
     }
   }
 
   /* ===================== Adicionar ===================== */
 
-  private async enterAdicionar(userId: string, chatId: string): Promise<void> {
+  private async enterAdicionar(userId: string, chatId: string, transport: MessageTransport): Promise<void> {
     // Seed a draft entity that both the free text and any images attach to.
     const entity = await this.repo.createEntity({
       name: 'Novo cadastro',
@@ -160,7 +171,7 @@ export class WhatsAppFlow {
     });
     log('flow', `adicionar: draft entity ${entity.id} created for user ${userId}`);
     await this.repo.setConversationState(userId, 'add_collecting', { entityId: entity.id, chatId });
-    await this.transport.sendText(chatId, ptBR.addPrompt);
+    await transport.sendText(chatId, ptBR.addPrompt);
   }
 
   private async onAddText(
@@ -168,42 +179,44 @@ export class WhatsAppFlow {
     chatId: string,
     text: string,
     context: Record<string, unknown>,
+    transport: MessageTransport,
   ): Promise<void> {
     const entityId = typeof context.entityId === 'string' ? context.entityId : null;
     if (!entityId) {
       // Context lost somehow — restart the Adicionar flow cleanly.
-      await this.enterAdicionar(userId, chatId);
+      await this.enterAdicionar(userId, chatId, transport);
       return;
     }
     if (!text || isFinishWord(text)) {
-      await this.transport.sendText(chatId, ptBR.addNeedDescription);
+      await transport.sendText(chatId, ptBR.addNeedDescription);
       return;
     }
 
-    await this.transport.sendText(chatId, ptBR.addAnalyzing);
-    await this.transport.sendTyping?.(chatId, true);
+    await transport.sendText(chatId, ptBR.addAnalyzing);
+    await transport.sendTyping?.(chatId, true);
     const job = await this.repo.enqueueJob({
       userId,
       job: 'enrich_text',
       entityId,
-      payload: { chatId, text },
+      payload: { chatId, channel: transport.channel, text },
     });
     log('flow', `adicionar: enrich_text job ${job.id} enqueued for entity ${entityId}`);
-    await this.transport.sendTyping?.(chatId, false);
+    await transport.sendTyping?.(chatId, false);
   }
 
   private async onAddMedia(
     msg: IncomingMessage,
     userId: string,
     context: Record<string, unknown>,
+    transport: MessageTransport,
   ): Promise<void> {
     const entityId = typeof context.entityId === 'string' ? context.entityId : null;
     if (!entityId) {
-      await this.enterAdicionar(userId, msg.chatId);
+      await this.enterAdicionar(userId, msg.chatId, transport);
       return;
     }
 
-    const { data, mimeType } = await this.transport.downloadMedia(msg);
+    const { data, mimeType } = await transport.downloadMedia(msg);
     const sha256 = createHash('sha256').update(data).digest('hex');
     const key = `business/${userId}/${randomUUID()}.${extForMime(mimeType)}`;
     const storageKey = await this.storage.upload({ key, data, contentType: mimeType });
@@ -223,21 +236,26 @@ export class WhatsAppFlow {
       job: 'embed_media',
       entityId,
       entityMediaId: media.id,
-      payload: { chatId: msg.chatId },
+      payload: { chatId: msg.chatId, channel: transport.channel },
     });
     log('flow', `adicionar: embed_media job enqueued for media ${media.id}`);
-    await this.transport.sendText(msg.chatId, ptBR.addMediaReceived);
+    await transport.sendText(msg.chatId, ptBR.addMediaReceived);
   }
 
   /* ===================== Consultar ===================== */
 
-  private async onConsultQuery(userId: string, chatId: string, query: string): Promise<void> {
+  private async onConsultQuery(
+    userId: string,
+    chatId: string,
+    query: string,
+    transport: MessageTransport,
+  ): Promise<void> {
     if (!query) {
-      await this.transport.sendText(chatId, ptBR.consultPrompt);
+      await transport.sendText(chatId, ptBR.consultPrompt);
       return;
     }
-    await this.transport.sendText(chatId, ptBR.consultSearching);
-    await this.transport.sendTyping?.(chatId, true);
+    await transport.sendText(chatId, ptBR.consultSearching);
+    await transport.sendTyping?.(chatId, true);
 
     // Search runs across ALL confirmed businesses (shared directory), not just
     // this user's own entries.
@@ -251,18 +269,18 @@ export class WhatsAppFlow {
 
     // Back to idle regardless of outcome; a new "oi" reopens the menu.
     await this.repo.setConversationState(userId, 'idle', {});
-    await this.transport.sendTyping?.(chatId, false);
+    await transport.sendTyping?.(chatId, false);
 
     if (matches.length === 0) {
-      await this.transport.sendText(chatId, ptBR.consultNoResults);
+      await transport.sendText(chatId, ptBR.consultNoResults);
       return;
     }
 
-    await this.transport.sendText(chatId, ptBR.consultHeader(matches.length));
+    await transport.sendText(chatId, ptBR.consultHeader(matches.length));
     for (const match of matches) {
       const entity = await this.repo.getEntityById(match.id);
       if (!entity) continue;
-      await this.transport.sendText(
+      await transport.sendText(
         chatId,
         ptBR.consultResult({
           name: entity.name,
@@ -275,18 +293,23 @@ export class WhatsAppFlow {
           similarity: match.similarity,
         }),
       );
-      await this.sendEntityMedia(chatId, entity.id, entity.name);
+      await this.sendEntityMedia(chatId, entity.id, entity.name, transport);
     }
   }
 
   /** Send up to CONSULT_MAX_MEDIA images (card/photos) for a matched entity. */
-  private async sendEntityMedia(chatId: string, entityId: string, caption: string): Promise<void> {
+  private async sendEntityMedia(
+    chatId: string,
+    entityId: string,
+    caption: string,
+    transport: MessageTransport,
+  ): Promise<void> {
     const media = await this.repo.listMediaByEntity(entityId);
     const images = media.filter((m) => m.mediaType === 'image').slice(0, CONSULT_MAX_MEDIA);
     for (const item of images) {
       try {
         const url = await this.storage.getSignedUrl(item.storageUrl, 600);
-        await this.transport.sendImage(chatId, {
+        await transport.sendImage(chatId, {
           url,
           mimeType: item.mimeType ?? 'image/jpeg',
           caption,
@@ -304,6 +327,7 @@ export class WhatsAppFlow {
     chatId: string,
     decision: 'accept' | 'reject',
     context: Record<string, unknown>,
+    transport: MessageTransport,
   ): Promise<void> {
     let entityId = typeof context.entityId === 'string' ? context.entityId : null;
     if (!entityId) {
@@ -318,13 +342,13 @@ export class WhatsAppFlow {
     await this.repo.setConversationState(userId, 'idle', {});
 
     if (!entityId) {
-      await this.transport.sendText(chatId, ptBR.notUnderstood);
+      await transport.sendText(chatId, ptBR.notUnderstood);
       return;
     }
 
     if (decision === 'reject') {
       await this.repo.setEntityStatus(entityId, 'rejected');
-      await this.transport.sendText(chatId, ptBR.discarded);
+      await transport.sendText(chatId, ptBR.discarded);
       return;
     }
 
@@ -334,18 +358,18 @@ export class WhatsAppFlow {
       const vec = await this.embeddings.embedText(entity.description);
       await this.repo.setEntityEmbedding(entity.id, vec, this.embeddings.model);
     }
-    await this.transport.sendText(chatId, ptBR.saved);
+    await transport.sendText(chatId, ptBR.saved);
   }
 
   /* ===================== business-card flow 1 ===================== */
 
-  private async onCardPhoto(msg: IncomingMessage, userId: string): Promise<void> {
+  private async onCardPhoto(msg: IncomingMessage, userId: string, transport: MessageTransport): Promise<void> {
     log('flow', `onCardPhoto start msg=${msg.id} mediaUrl=${msg.media?.url ?? '(none)'}`);
-    await this.transport.sendText(msg.chatId, ptBR.received);
-    await this.transport.sendTyping?.(msg.chatId, true);
+    await transport.sendText(msg.chatId, ptBR.received);
+    await transport.sendTyping?.(msg.chatId, true);
 
-    // Download bytes now (WAHA media URLs are short-lived) and hand to storage.
-    const { data, mimeType } = await this.transport.downloadMedia(msg);
+    // Download bytes now (provider media URLs are short-lived) and hand to storage.
+    const { data, mimeType } = await transport.downloadMedia(msg);
     log('flow', `media downloaded ${data.length} bytes mime=${mimeType}`);
 
     const sha256 = createHash('sha256').update(data).digest('hex');
@@ -375,24 +399,26 @@ export class WhatsAppFlow {
       entityId: entity.id,
       entityMediaId: media.id,
       waMessageId: msg.id,
-      payload: { chatId: msg.chatId },
+      payload: { chatId: msg.chatId, channel: transport.channel },
     });
     log('flow', `job enqueued id=${job.id} -> worker will pick it up`);
-    await this.transport.sendTyping?.(msg.chatId, false);
+    await transport.sendTyping?.(msg.chatId, false);
   }
 
   /**
    * Called by the worker once the agent has written + embedded the entity.
-   * Parks the user in `awaiting_decision` so their next 1/2 confirms this entity.
+   * Parks the user in `awaiting_decision` and sends the proposal on `channel`
+   * (the backend the originating message came in on).
    */
   async presentProposal(
     userId: string,
     chatId: string,
+    channel: Channel,
     entityId: string,
     proposal: { name: string; summary: string },
   ): Promise<void> {
     await this.repo.setConversationState(userId, 'awaiting_decision', { entityId });
-    await this.transport.sendButtons(chatId, ptBR.proposal(proposal), [
+    await this.transports.get(channel).sendButtons(chatId, ptBR.proposal(proposal), [
       { id: 'accept', title: ptBR.accept },
       { id: 'reject', title: ptBR.reject },
     ]);

@@ -9,6 +9,9 @@
 
 export type ChatId = string; // WhatsApp JID, e.g. "5511999999999@c.us"
 
+/** Which messaging backend a message came in on / should go out on. */
+export type Channel = 'whatsapp' | 'telegram';
+
 export type IncomingMessageType = 'text' | 'image' | 'document' | 'audio' | 'video' | 'other';
 
 export interface IncomingMedia {
@@ -24,6 +27,8 @@ export interface IncomingMedia {
 export interface IncomingMessage {
   /** Provider message id (used for idempotency / dedupe). */
   id: string;
+  /** The backend this message arrived on; replies must go out on the same one. */
+  channel: Channel;
   chatId: ChatId;
   /** Sender JID; equals chatId for 1:1 chats. */
   from: ChatId;
@@ -57,6 +62,9 @@ export interface SendImageOptions {
 export type MessageHandler = (message: IncomingMessage) => void | Promise<void>;
 
 export interface MessageTransport {
+  /** The backend this transport speaks (used to route replies by channel). */
+  readonly channel: Channel;
+
   /**
    * Begin receiving messages. For a webhook-based transport this may be a no-op
    * (messages arrive via handleWebhook); for a polling/socket transport it opens

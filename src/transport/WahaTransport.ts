@@ -9,6 +9,7 @@
 
 import { log } from '../log.js';
 import type {
+  Channel,
   ChatId,
   IncomingMessage,
   IncomingMessageType,
@@ -43,6 +44,7 @@ interface WahaEvent {
 }
 
 export class WahaTransport implements MessageTransport {
+  readonly channel: Channel = 'whatsapp';
   private readonly cfg: WahaConfig;
   private readonly handlers: MessageHandler[] = [];
   /** Cache of resolved @lid -> @c.us phone JIDs. */
@@ -136,6 +138,7 @@ export class WahaTransport implements MessageTransport {
   private normalize(p: WahaMessagePayload): IncomingMessage {
     const message: IncomingMessage = {
       id: p.id,
+      channel: this.channel,
       chatId: p.from,
       from: p.from,
       type: mapType(p.type, p.hasMedia, p.media?.mimetype),

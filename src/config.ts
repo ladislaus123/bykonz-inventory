@@ -38,10 +38,28 @@ export const config = {
     enabled: (process.env.WORKER_ENABLED ?? 'true') === 'true',
     pollMs: Number(process.env.WORKER_POLL_MS ?? '3000'),
   },
+  // Which messaging backend(s) drive the flow. Comma-separated to run more than
+  // one at once, e.g. TRANSPORT_DRIVER=waha,telegram — WhatsApp and Telegram are
+  // then served simultaneously and each user is answered on their own channel.
+  transport: {
+    drivers: (process.env.TRANSPORT_DRIVER ?? 'waha')
+      .split(',')
+      .map((d) => d.trim().toLowerCase())
+      .filter((d): d is 'waha' | 'telegram' => d === 'waha' || d === 'telegram'),
+  },
   waha: {
     baseUrl: process.env.WAHA_BASE_URL ?? 'http://localhost:3000',
     apiKey: process.env.WAHA_API_KEY ?? '',
     session: process.env.WAHA_SESSION ?? 'default',
+  },
+  telegram: {
+    botToken: process.env.TELEGRAM_BOT_TOKEN ?? '',
+    pollTimeout: Number(process.env.TELEGRAM_POLL_TIMEOUT ?? '30'),
+    // If set, the transport registers this URL via setWebhook on start and
+    // receives updates at POST /webhook/telegram instead of long polling.
+    webhookUrl: process.env.TELEGRAM_WEBHOOK_URL ?? '',
+    // Optional shared secret; Telegram echoes it in X-Telegram-Bot-Api-Secret-Token.
+    webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET ?? '',
   },
   server: {
     port: Number(process.env.PORT ?? '8080'),
