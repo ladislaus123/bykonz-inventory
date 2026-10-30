@@ -44,7 +44,9 @@ async function main() {
   const repo = new SupabaseRepository(config.supabase.url, config.supabase.serviceRoleKey);
   const embeddings = new EmbeddingClient(config.openrouter);
   const storage = await createStorage();
-  const flow = new WhatsAppFlow(transports, repo, embeddings, storage);
+  // Shared OpenRouter chat client: Consultar reranking + the enrichment agent.
+  const chat = new OpenRouterChat(config.openrouter.apiKey);
+  const flow = new WhatsAppFlow(transports, repo, embeddings, storage, chat, config.agent.model);
 
   for (const transport of transports.all()) {
     transport.onMessage(flow.handle);
@@ -53,7 +55,6 @@ async function main() {
 
   // Autonomous enrichment worker (agentic loop over OpenRouter).
   if (config.worker.enabled) {
-    const chat = new OpenRouterChat(config.openrouter.apiKey);
     const agent = new EnrichmentAgent(chat, repo, embeddings, config.agent);
     const worker = new Worker(repo, agent, flow, storage, embeddings, config.worker.pollMs);
     worker.start();

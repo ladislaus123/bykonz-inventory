@@ -25,18 +25,24 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 
+import type { OpenRouterChat } from './agent/OpenRouterChat.js';
 import { log, logErr } from './log.js';
 import { ptBR } from './messages.pt-BR.js';
 import type { EmbeddingClient } from './embeddings/EmbeddingClient.js';
 import type { Repository } from './repository/Repository.js';
 import type { Storage } from './storage/Storage.js';
+import type { EntityMatch } from './types/domain.js';
 import type { Channel, IncomingMessage, MessageTransport } from './transport/MessageTransport.js';
 import type { TransportRouter } from './transport/TransportRouter.js';
 
-/** How many businesses (and images each) a Consultar reply shows. */
-const CONSULT_MAX_RESULTS = 3;
-const CONSULT_MAX_MEDIA = 3;
-const CONSULT_MIN_SIMILARITY = 0.2;
+/** Consultar tuning. */
+const CONSULT_MAX_RESULTS = 3; // businesses shown to the user
+const CONSULT_MAX_MEDIA = 3; // images per business
+const CONSULT_CANDIDATES = 8; // vector candidates fetched before reranking
+const CONSULT_MIN_SIMILARITY = 0.25; // floor to drop obvious noise pre-rerank
+// Fallback (rerank unavailable): keep only candidates within this cosine gap of
+// the top hit, since similarity has a high, compressed baseline here.
+const CONSULT_FALLBACK_GAP = 0.06;
 
 export class WhatsAppFlow {
   constructor(
@@ -44,6 +50,8 @@ export class WhatsAppFlow {
     private readonly repo: Repository,
     private readonly embeddings: EmbeddingClient,
     private readonly storage: Storage,
+    private readonly chat: OpenRouterChat,
+    private readonly rerankModel: string,
   ) {}
 
   /** Wire this as every transport's message handler. */
@@ -258,14 +266,17 @@ export class WhatsAppFlow {
     await transport.sendTyping?.(chatId, true);
 
     // Search runs across ALL confirmed businesses (shared directory), not just
-    // this user's own entries.
+    // this user's own entries. Pull a wider candidate set, then rerank it down
+    // to the ones that actually satisfy the query (embedding similarity alone
+    // has a high baseline, so unrelated businesses still score 0.5+).
     const vec = await this.embeddings.embedText(query);
-    const matches = await this.repo.searchEntities(vec, {
+    const candidates = await this.repo.searchEntities(vec, {
       status: 'confirmed',
-      matchCount: CONSULT_MAX_RESULTS,
+      matchCount: CONSULT_CANDIDATES,
       similarityThreshold: CONSULT_MIN_SIMILARITY,
     });
-    log('flow', `consultar: query="${query}" -> ${matches.length} match(es)`);
+    const matches = (await this.rerankMatches(query, candidates)).slice(0, CONSULT_MAX_RESULTS);
+    log('flow', `consultar: query="${query}" -> ${candidates.length} candidate(s) -> ${matches.length} match(es)`);
 
     // Back to idle regardless of outcome; a new "oi" reopens the menu.
     await this.repo.setConversationState(userId, 'idle', {});
@@ -294,6 +305,50 @@ export class WhatsAppFlow {
         }),
       );
       await this.sendEntityMedia(chatId, entity.id, entity.name, transport);
+    }
+  }
+
+  /**
+   * Rerank vector candidates with the LLM so only businesses that genuinely
+   * satisfy the query survive (e.g. "restaurant" shouldn't return an offroad
+   * shop just because its description scored 0.56). The model returns the
+   * relevant candidate numbers, most relevant first; irrelevant ones are
+   * dropped. Falls back to a relative-similarity gap if the call fails.
+   */
+  private async rerankMatches(query: string, candidates: EntityMatch[]): Promise<EntityMatch[]> {
+    if (candidates.length <= 1) return candidates;
+
+    const list = candidates
+      .map((c, i) => {
+        const desc = (c.description ?? '').replace(/\s+/g, ' ').slice(0, 300);
+        return `${i + 1}. ${c.name}\n${desc}`;
+      })
+      .join('\n\n');
+
+    try {
+      const res = await this.chat.complete({
+        model: this.rerankModel,
+        temperature: 0,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Você seleciona quais negócios atendem à busca do usuário. ' +
+              'Responda APENAS com um array JSON com os números dos negócios realmente relevantes, ' +
+              'do mais para o menos relevante (ex.: [2,1]). Se nenhum servir, responda [].',
+          },
+          { role: 'user', content: `Busca do usuário: "${query}"\n\nNegócios:\n${list}` },
+        ],
+      });
+
+      const raw = typeof res.content === 'string' ? res.content : '';
+      const picked = parseIndexArray(raw, candidates.length);
+      if (picked === null) throw new Error('unparseable rerank response');
+      return picked.map((n) => candidates[n - 1]!);
+    } catch (err) {
+      logErr('flow', 'consultar: rerank failed, falling back to similarity gap', err);
+      const top = candidates[0]!.similarity;
+      return candidates.filter((c) => c.similarity >= top - CONSULT_FALLBACK_GAP);
     }
   }
 
@@ -454,6 +509,33 @@ function parseMenuChoice(text: string): 'add' | 'consult' | null {
   if (/^(1|adicionar|add|cadastrar)\b/.test(t)) return 'add';
   if (/^(2|consultar|buscar|procurar|pesquisar)\b/.test(t)) return 'consult';
   return null;
+}
+
+/**
+ * Parse the rerank model's reply into valid 1-based indices (deduped, in order).
+ * Returns null if no JSON array is found (so the caller can fall back); an empty
+ * array is a valid "nothing matched" answer.
+ */
+function parseIndexArray(text: string, max: number): number[] | null {
+  const m = text.match(/\[[^\]]*\]/);
+  if (!m) return null;
+  let arr: unknown;
+  try {
+    arr = JSON.parse(m[0]);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(arr)) return null;
+  const seen = new Set<number>();
+  const out: number[] = [];
+  for (const v of arr) {
+    const n = typeof v === 'number' ? v : Number(v);
+    if (Number.isInteger(n) && n >= 1 && n <= max && !seen.has(n)) {
+      seen.add(n);
+      out.push(n);
+    }
+  }
+  return out;
 }
 
 function parseDecision(text: string): 'accept' | 'reject' | null {
