@@ -90,8 +90,9 @@ const TOOLS: ToolDef[] = [
 ];
 
 const SYSTEM_PROMPT = `Você é um assistente que cadastra empresas a partir de fotos de cartões de visita, folhetos e panfletos, OU a partir de descrições em texto enviadas pelo usuário.
+Quando houver mais de uma imagem, elas podem ser a frente e o verso do mesmo cartão (ou fotos complementares do mesmo negócio): analise todas e combine as informações em um único cadastro.
 Fluxo obrigatório:
-1. Analise a entrada (imagem ou texto) e extraia/normalize o máximo de informação (nome, telefone, e-mail, site, endereço, segmento).
+1. Analise a entrada (imagem(ns) ou texto) e extraia/normalize o máximo de informação (nome, telefone, e-mail, site, endereço, segmento).
 2. Use a ferramenta search_web para confirmar e enriquecer os dados na internet quando útil.
 3. Chame save_business UMA vez com os dados consolidados e normalizados. O campo description deve ser um parágrafo rico em português, pois será usado para busca semântica.
 4. Chame finish com um resumo curto em português para o usuário confirmar.
@@ -106,14 +107,30 @@ export class EnrichmentAgent {
   ) {}
 
   /**
-   * Run the enrichment loop against either a card/brochure image (`imageUrl`) or
-   * a free-text business description (`text`). At least one must be provided.
+   * Run the enrichment loop against either card/brochure image(s) (`imageUrl` or
+   * `imageUrls` — e.g. the front and back of the same card) or a free-text
+   * business description (`text`). At least one must be provided.
    */
-  async run(input: { entityId: string; imageUrl?: string; text?: string }): Promise<AgentResult> {
+  async run(input: {
+    entityId: string;
+    imageUrl?: string;
+    imageUrls?: string[];
+    text?: string;
+  }): Promise<AgentResult> {
+    const images = [...(input.imageUrls ?? []), ...(input.imageUrl ? [input.imageUrl] : [])];
     const userContent: ContentPart[] = [];
-    if (input.imageUrl) {
-      userContent.push({ type: 'text', text: 'Cadastre o negócio desta imagem. Siga o fluxo com as ferramentas.' });
-      userContent.push({ type: 'image_url', image_url: { url: input.imageUrl } });
+    if (images.length) {
+      userContent.push({
+        type: 'text',
+        text:
+          images.length > 1
+            ? `Cadastre o negócio a partir destas ${images.length} imagens (podem ser frente e verso ` +
+              'do mesmo cartão, ou fotos complementares — combine as informações). Siga o fluxo com as ferramentas.'
+            : 'Cadastre o negócio desta imagem. Siga o fluxo com as ferramentas.',
+      });
+      for (const url of images) {
+        userContent.push({ type: 'image_url', image_url: { url } });
+      }
     } else if (input.text?.trim()) {
       userContent.push({
         type: 'text',
@@ -133,7 +150,10 @@ export class EnrichmentAgent {
 
     let result: AgentResult | null = null;
 
-    log('agent', `run start entity=${input.entityId} model=${this.cfg.model} input=${input.imageUrl ? 'image' : 'text'}`);
+    log(
+      'agent',
+      `run start entity=${input.entityId} model=${this.cfg.model} input=${images.length ? `${images.length} image(s)` : 'text'}`,
+    );
     for (let step = 0; step < this.cfg.maxSteps; step++) {
       const assistant = await this.chat.complete({
         model: this.cfg.model,

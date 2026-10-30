@@ -86,19 +86,32 @@ export class Worker {
     }
   }
 
-  /** Flow 1: card/brochure photo -> vision agent -> proposal. */
+  /** Flow 1: card/brochure photo(s) -> vision agent -> proposal. */
   private async runCardExtraction(job: Job): Promise<void> {
-    if (!job.entityId || !job.entityMediaId) {
-      throw new Error('extract_card job missing entityId/entityMediaId');
+    if (!job.entityId) throw new Error('extract_card job missing entityId');
+
+    // One card may have several photos (front + back, extra angles). Newer jobs
+    // carry every media id in payload.mediaIds; older ones only entityMediaId.
+    const payloadIds = Array.isArray(job.payload.mediaIds)
+      ? (job.payload.mediaIds as string[]).filter((id) => typeof id === 'string')
+      : [];
+    const mediaIds = payloadIds.length ? payloadIds : job.entityMediaId ? [job.entityMediaId] : [];
+    if (mediaIds.length === 0) throw new Error('extract_card job has no media to read');
+
+    // storage_url holds the object path; sign each so the model can fetch them.
+    const imageUrls: string[] = [];
+    for (const id of mediaIds) {
+      const media = await this.repo.getMediaById(id);
+      if (!media) {
+        logErr('worker', `job ${job.id}: media ${id} not found, skipping`);
+        continue;
+      }
+      imageUrls.push(await this.storage.getSignedUrl(media.storageUrl, 600));
     }
-    const media = await this.repo.getMediaById(job.entityMediaId);
-    if (!media) throw new Error(`media ${job.entityMediaId} not found`);
+    if (imageUrls.length === 0) throw new Error('extract_card job: none of its media could be resolved');
+    log('worker', `job ${job.id}: ${imageUrls.length} signed image URL(s) ready, running agent…`);
 
-    // storage_url holds the object path; sign it so the model can fetch it.
-    const imageUrl = await this.storage.getSignedUrl(media.storageUrl, 600);
-    log('worker', `job ${job.id}: signed image URL ready, running agent…`);
-
-    const result = await this.agent.run({ entityId: job.entityId, imageUrl });
+    const result = await this.agent.run({ entityId: job.entityId, imageUrls });
     log('worker', `job ${job.id}: agent finished name="${result.name}"`);
 
     await this.sendProposal(job, result);

@@ -14,6 +14,25 @@ export const ptBR = {
     'Recebi sua imagem! 🔎 Estou analisando e buscando mais informações sobre esse ' +
     'negócio na internet. Isso leva alguns segundos…',
 
+  /* ---- business-card front/back capture ---- */
+
+  /** Shown after the FIRST card photo: the back is optional. */
+  cardFrontReceived:
+    'Recebi a foto do cartão! 📸 Se o cartão tiver *verso* (ou outras fotos), ' +
+    'envie agora que eu considero tudo junto.\n\n' +
+    'Quando terminar, toque em *Processar agora* ou mande qualquer mensagem.',
+
+  /** Button to finish the capture and run the agent. */
+  cardProcessNow: 'Processar agora ✅',
+
+  /** Shown after each ADDITIONAL card photo. */
+  cardMoreReceived: 'Foto adicional anexada. 📎 Envie mais fotos ou toque em *Processar agora*.',
+
+  /** Shown when the capture is closed and the agent starts. */
+  cardProcessing:
+    'Perfeito! 🔎 Estou analisando as fotos e buscando mais informações sobre esse ' +
+    'negócio na internet. Isso leva alguns segundos…',
+
   /** Rendered after the agent finishes; data is interpolated. */
   proposal: (e: { name: string; summary: string }) =>
     `Encontrei isto:\n\n*${e.name}*\n${e.summary}\n\nPosso salvar essas informações?`,

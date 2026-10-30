@@ -100,6 +100,16 @@ export class WhatsAppFlow {
           else await this.onMenuChoice(user.id, msg.chatId, text, transport);
           return;
 
+        case 'card_collecting':
+          if (hasDownloadableMedia) {
+            // Another photo of the same card (back, extra angle) — attach it.
+            await this.onCardCollectingPhoto(msg, user.id, state.context, transport);
+          } else {
+            // Anything else ("Processar agora", "pronto", etc.) closes the capture.
+            await this.finishCardCapture(user.id, msg.chatId, state.context, transport);
+          }
+          return;
+
         case 'add_collecting':
           if (hasDownloadableMedia) await this.onAddMedia(msg, user.id, state.context, transport);
           else await this.onAddText(user.id, msg.chatId, text, state.context, transport);
@@ -426,19 +436,14 @@ export class WhatsAppFlow {
 
   /* ===================== business-card flow 1 ===================== */
 
+  /**
+   * First card photo: create the draft entity, attach the photo, and park the
+   * user in `card_collecting` so they can OPTIONALLY add the back (or more
+   * photos) before the agent runs. A button lets them process immediately.
+   */
   private async onCardPhoto(msg: IncomingMessage, userId: string, transport: MessageTransport): Promise<void> {
     log('flow', `onCardPhoto start msg=${msg.id} mediaUrl=${msg.media?.url ?? '(none)'}`);
-    await transport.sendText(msg.chatId, ptBR.received);
     await transport.sendTyping?.(msg.chatId, true);
-
-    // Download bytes now (provider media URLs are short-lived) and hand to storage.
-    const { data, mimeType } = await transport.downloadMedia(msg);
-    log('flow', `media downloaded ${data.length} bytes mime=${mimeType}`);
-
-    const sha256 = createHash('sha256').update(data).digest('hex');
-    const key = `cards/${userId}/${randomUUID()}.${extForMime(mimeType)}`;
-    const storageKey = await this.storage.upload({ key, data, contentType: mimeType });
-    log('flow', `media uploaded key=${storageKey}`);
 
     const entity = await this.repo.createEntity({
       name: 'Novo cadastro',
@@ -447,25 +452,99 @@ export class WhatsAppFlow {
       createdBy: userId,
     });
 
-    const media = await this.repo.createMedia({
+    const mediaId = await this.storeCardMedia(msg, userId, entity.id, transport);
+    await this.repo.setConversationState(userId, 'card_collecting', {
       entityId: entity.id,
+      chatId: msg.chatId,
+      channel: transport.channel,
+      mediaIds: [mediaId],
+    });
+    log('flow', `card_collecting: entity ${entity.id} started with media ${mediaId}`);
+
+    await transport.sendTyping?.(msg.chatId, false);
+    await transport.sendButtons(msg.chatId, ptBR.cardFrontReceived, [
+      { id: 'card_done', title: ptBR.cardProcessNow },
+    ]);
+  }
+
+  /** An extra photo of the same card (back/angle) while in `card_collecting`. */
+  private async onCardCollectingPhoto(
+    msg: IncomingMessage,
+    userId: string,
+    context: Record<string, unknown>,
+    transport: MessageTransport,
+  ): Promise<void> {
+    const entityId = typeof context.entityId === 'string' ? context.entityId : null;
+    if (!entityId) {
+      // Context lost — treat this photo as a fresh capture.
+      await this.onCardPhoto(msg, userId, transport);
+      return;
+    }
+    const mediaId = await this.storeCardMedia(msg, userId, entityId, transport);
+    const mediaIds = Array.isArray(context.mediaIds) ? (context.mediaIds as string[]) : [];
+    mediaIds.push(mediaId);
+    await this.repo.setConversationState(userId, 'card_collecting', { ...context, mediaIds });
+    log('flow', `card_collecting: entity ${entityId} now has ${mediaIds.length} photo(s)`);
+    await transport.sendText(msg.chatId, ptBR.cardMoreReceived);
+  }
+
+  /** Close the capture and enqueue a single extraction over all collected photos. */
+  private async finishCardCapture(
+    userId: string,
+    chatId: string,
+    context: Record<string, unknown>,
+    transport: MessageTransport,
+  ): Promise<void> {
+    const entityId = typeof context.entityId === 'string' ? context.entityId : null;
+    const mediaIds = Array.isArray(context.mediaIds) ? (context.mediaIds as string[]) : [];
+    if (!entityId || mediaIds.length === 0) {
+      // Nothing captured — nudge the user back to a known state.
+      await this.repo.setConversationState(userId, 'idle', {});
+      await transport.sendText(chatId, ptBR.idleHint);
+      return;
+    }
+
+    // Back to idle while the worker runs; it moves us to awaiting_decision when done.
+    await this.repo.setConversationState(userId, 'idle', {});
+    await transport.sendText(chatId, ptBR.cardProcessing);
+    await transport.sendTyping?.(chatId, true);
+
+    const job = await this.repo.enqueueJob({
+      userId,
+      job: 'extract_card',
+      entityId,
+      entityMediaId: mediaIds[0], // primary; the rest ride in payload.mediaIds
+      payload: { chatId, channel: transport.channel, mediaIds },
+    });
+    log('flow', `card: extract_card job ${job.id} enqueued for entity ${entityId} (${mediaIds.length} photo(s))`);
+    await transport.sendTyping?.(chatId, false);
+  }
+
+  /** Download, hash, upload to storage, and create the media row; returns its id. */
+  private async storeCardMedia(
+    msg: IncomingMessage,
+    userId: string,
+    entityId: string,
+    transport: MessageTransport,
+  ): Promise<string> {
+    // Download bytes now (provider media URLs are short-lived) and hand to storage.
+    const { data, mimeType } = await transport.downloadMedia(msg);
+    log('flow', `card media downloaded ${data.length} bytes mime=${mimeType}`);
+
+    const sha256 = createHash('sha256').update(data).digest('hex');
+    const key = `cards/${userId}/${randomUUID()}.${extForMime(mimeType)}`;
+    const storageKey = await this.storage.upload({ key, data, contentType: mimeType });
+    log('flow', `card media uploaded key=${storageKey}`);
+
+    const media = await this.repo.createMedia({
+      entityId,
       storageUrl: storageKey, // object path; resolve to a signed URL on read
       mediaType: 'image',
       mimeType,
       sha256,
       waMessageId: msg.id,
     });
-
-    const job = await this.repo.enqueueJob({
-      userId,
-      job: 'extract_card',
-      entityId: entity.id,
-      entityMediaId: media.id,
-      waMessageId: msg.id,
-      payload: { chatId: msg.chatId, channel: transport.channel },
-    });
-    log('flow', `job enqueued id=${job.id} -> worker will pick it up`);
-    await transport.sendTyping?.(msg.chatId, false);
+    return media.id;
   }
 
   /**
