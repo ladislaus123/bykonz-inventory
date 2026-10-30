@@ -34,7 +34,7 @@ async function main() {
   if (config.worker.enabled) {
     const chat = new OpenRouterChat(config.openrouter.apiKey);
     const agent = new EnrichmentAgent(chat, repo, embeddings, config.agent);
-    const worker = new Worker(repo, agent, flow, storage, config.worker.pollMs);
+    const worker = new Worker(repo, agent, flow, storage, embeddings, config.worker.pollMs);
     worker.start();
   }
 

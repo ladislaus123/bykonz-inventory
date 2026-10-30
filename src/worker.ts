@@ -11,11 +11,15 @@
  */
 
 import type { EnrichmentAgent } from './agent/EnrichmentAgent.js';
+import type { EmbeddingClient } from './embeddings/EmbeddingClient.js';
 import type { WhatsAppFlow } from './flow.js';
 import { log, logErr } from './log.js';
 import type { Repository } from './repository/Repository.js';
 import type { Storage } from './storage/Storage.js';
-import type { Job } from './types/domain.js';
+import type { Job, JobType } from './types/domain.js';
+
+/** Job kinds this worker knows how to run; others are left for future workers. */
+const HANDLED: ReadonlySet<JobType> = new Set<JobType>(['extract_card', 'enrich_text', 'embed_media']);
 
 export class Worker {
   private timer: NodeJS.Timeout | null = null;
@@ -26,6 +30,7 @@ export class Worker {
     private readonly agent: EnrichmentAgent,
     private readonly flow: WhatsAppFlow,
     private readonly storage: Storage,
+    private readonly embeddings: EmbeddingClient,
     private readonly pollMs = 3000,
   ) {}
 
@@ -46,7 +51,7 @@ export class Worker {
     try {
       const jobs = await this.repo.listPendingJobs(10);
       for (const job of jobs) {
-        if (job.job !== 'extract_card') continue; // other job types: later
+        if (!HANDLED.has(job.job)) continue; // other job types: later
         await this.process(job);
       }
     } catch (err) {
@@ -60,33 +65,86 @@ export class Worker {
     log('worker', `picked up job ${job.id} (${job.job}) entity=${job.entityId}`);
     await this.repo.markJobRunning(job.id);
     try {
-      if (!job.entityId || !job.entityMediaId) {
-        throw new Error('extract_card job missing entityId/entityMediaId');
+      switch (job.job) {
+        case 'extract_card':
+          await this.runCardExtraction(job);
+          break;
+        case 'enrich_text':
+          await this.runTextEnrichment(job);
+          break;
+        case 'embed_media':
+          await this.runMediaEmbedding(job);
+          break;
+        default:
+          throw new Error(`worker cannot handle job type ${job.job}`);
       }
-      const media = await this.repo.getMediaById(job.entityMediaId);
-      if (!media) throw new Error(`media ${job.entityMediaId} not found`);
-
-      // storage_url holds the object path; sign it so the model can fetch it.
-      const imageUrl = await this.storage.getSignedUrl(media.storageUrl, 600);
-      log('worker', `job ${job.id}: signed image URL ready, running agent…`);
-
-      const result = await this.agent.run({ entityId: job.entityId, imageUrl });
-      log('worker', `job ${job.id}: agent finished name="${result.name}"`);
-
-      const chatId = String(job.payload.chatId ?? '');
-      if (chatId) {
-        await this.flow.presentProposal(chatId, job.entityId, result);
-        log('worker', `job ${job.id}: proposal sent to ${chatId}`);
-      } else {
-        logErr('worker', `job ${job.id}: no chatId in payload, skipping proposal`);
-      }
-
-      await this.repo.markJobDone(job.id, { name: result.name });
-      log('worker', `job ${job.id} done: ${result.name}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await this.repo.markJobFailed(job.id, msg, { retry: true });
       logErr('worker', `job ${job.id} failed (will retry): ${msg}`, err);
     }
+  }
+
+  /** Flow 1: card/brochure photo -> vision agent -> proposal. */
+  private async runCardExtraction(job: Job): Promise<void> {
+    if (!job.entityId || !job.entityMediaId) {
+      throw new Error('extract_card job missing entityId/entityMediaId');
+    }
+    const media = await this.repo.getMediaById(job.entityMediaId);
+    if (!media) throw new Error(`media ${job.entityMediaId} not found`);
+
+    // storage_url holds the object path; sign it so the model can fetch it.
+    const imageUrl = await this.storage.getSignedUrl(media.storageUrl, 600);
+    log('worker', `job ${job.id}: signed image URL ready, running agent…`);
+
+    const result = await this.agent.run({ entityId: job.entityId, imageUrl });
+    log('worker', `job ${job.id}: agent finished name="${result.name}"`);
+
+    await this.sendProposal(job, result);
+    await this.repo.markJobDone(job.id, { name: result.name });
+    log('worker', `job ${job.id} done: ${result.name}`);
+  }
+
+  /** Adicionar: free-text description -> text agent -> proposal. */
+  private async runTextEnrichment(job: Job): Promise<void> {
+    if (!job.entityId) throw new Error('enrich_text job missing entityId');
+    const text = String(job.payload.text ?? '');
+    if (!text.trim()) throw new Error('enrich_text job missing payload.text');
+
+    const result = await this.agent.run({ entityId: job.entityId, text });
+    log('worker', `job ${job.id}: text agent finished name="${result.name}"`);
+
+    await this.sendProposal(job, result);
+    await this.repo.markJobDone(job.id, { name: result.name });
+    log('worker', `job ${job.id} done: ${result.name}`);
+  }
+
+  /** Adicionar: uploaded business image -> multimodal embedding stored on the media row. */
+  private async runMediaEmbedding(job: Job): Promise<void> {
+    if (!job.entityMediaId) throw new Error('embed_media job missing entityMediaId');
+    const media = await this.repo.getMediaById(job.entityMediaId);
+    if (!media) throw new Error(`media ${job.entityMediaId} not found`);
+
+    const signedUrl = await this.storage.getSignedUrl(media.storageUrl, 600);
+    const res = await fetch(signedUrl);
+    if (!res.ok) throw new Error(`fetch media bytes failed: ${res.status} ${res.statusText}`);
+    const data = Buffer.from(await res.arrayBuffer());
+    const mimeType = media.mimeType ?? res.headers.get('content-type') ?? 'image/jpeg';
+
+    const vec = await this.embeddings.embedImage(data, mimeType);
+    await this.repo.setMediaEmbedding(media.id, vec, this.embeddings.model);
+    await this.repo.markJobDone(job.id, { mediaId: media.id, dims: vec.length });
+    log('worker', `job ${job.id} done: embedded media ${media.id} (${vec.length} dims)`);
+  }
+
+  /** Shared: ask the user to confirm the proposed entity (Aceitar / Recusar). */
+  private async sendProposal(job: Job, result: { name: string; summary: string }): Promise<void> {
+    const chatId = String(job.payload.chatId ?? '');
+    if (!chatId) {
+      logErr('worker', `job ${job.id}: no chatId in payload, skipping proposal`);
+      return;
+    }
+    await this.flow.presentProposal(job.userId, chatId, job.entityId!, result);
+    log('worker', `job ${job.id}: proposal sent to ${chatId}`);
   }
 }

@@ -16,7 +16,7 @@ import { log } from '../log.js';
 import type { EmbeddingClient } from '../embeddings/EmbeddingClient.js';
 import type { Repository } from '../repository/Repository.js';
 import type { NewEntity } from '../types/domain.js';
-import { OpenRouterChat, type ChatMessage, type ToolDef } from './OpenRouterChat.js';
+import { OpenRouterChat, type ChatMessage, type ContentPart, type ToolDef } from './OpenRouterChat.js';
 
 export interface AgentConfig {
   model: string; // vision + tool-calling model, e.g. google/gemini-2.5-flash
@@ -89,11 +89,11 @@ const TOOLS: ToolDef[] = [
   },
 ];
 
-const SYSTEM_PROMPT = `Você é um assistente que cadastra empresas a partir de fotos de cartões de visita, folhetos e panfletos.
+const SYSTEM_PROMPT = `Você é um assistente que cadastra empresas a partir de fotos de cartões de visita, folhetos e panfletos, OU a partir de descrições em texto enviadas pelo usuário.
 Fluxo obrigatório:
-1. Analise a imagem e extraia o máximo de informação (nome, telefone, e-mail, site, endereço, segmento).
+1. Analise a entrada (imagem ou texto) e extraia/normalize o máximo de informação (nome, telefone, e-mail, site, endereço, segmento).
 2. Use a ferramenta search_web para confirmar e enriquecer os dados na internet quando útil.
-3. Chame save_business UMA vez com os dados consolidados. O campo description deve ser um parágrafo rico em português, pois será usado para busca semântica.
+3. Chame save_business UMA vez com os dados consolidados e normalizados. O campo description deve ser um parágrafo rico em português, pois será usado para busca semântica.
 4. Chame finish com um resumo curto em português para o usuário confirmar.
 Nunca invente dados que não consiga verificar; indique incerteza na confidence. Responda apenas usando as ferramentas.`;
 
@@ -105,21 +105,35 @@ export class EnrichmentAgent {
     private readonly cfg: AgentConfig,
   ) {}
 
-  async run(input: { entityId: string; imageUrl: string }): Promise<AgentResult> {
+  /**
+   * Run the enrichment loop against either a card/brochure image (`imageUrl`) or
+   * a free-text business description (`text`). At least one must be provided.
+   */
+  async run(input: { entityId: string; imageUrl?: string; text?: string }): Promise<AgentResult> {
+    const userContent: ContentPart[] = [];
+    if (input.imageUrl) {
+      userContent.push({ type: 'text', text: 'Cadastre o negócio desta imagem. Siga o fluxo com as ferramentas.' });
+      userContent.push({ type: 'image_url', image_url: { url: input.imageUrl } });
+    } else if (input.text?.trim()) {
+      userContent.push({
+        type: 'text',
+        text:
+          'Cadastre o negócio a partir da descrição a seguir, enviada pelo usuário. ' +
+          'Extraia e normalize os dados e siga o fluxo com as ferramentas.\n\n' +
+          `Descrição do usuário:\n"""\n${input.text.trim()}\n"""`,
+      });
+    } else {
+      throw new Error('EnrichmentAgent.run requires either imageUrl or text');
+    }
+
     const messages: ChatMessage[] = [
       { role: 'system', content: SYSTEM_PROMPT },
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: 'Cadastre o negócio desta imagem. Siga o fluxo com as ferramentas.' },
-          { type: 'image_url', image_url: { url: input.imageUrl } },
-        ],
-      },
+      { role: 'user', content: userContent },
     ];
 
     let result: AgentResult | null = null;
 
-    log('agent', `run start entity=${input.entityId} model=${this.cfg.model}`);
+    log('agent', `run start entity=${input.entityId} model=${this.cfg.model} input=${input.imageUrl ? 'image' : 'text'}`);
     for (let step = 0; step < this.cfg.maxSteps; step++) {
       const assistant = await this.chat.complete({
         model: this.cfg.model,

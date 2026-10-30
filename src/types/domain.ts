@@ -14,7 +14,17 @@ export type JobType =
   | 'save_to_database'
   | 'agent_internet_search'
   | 'extract_card'
-  | 'enrich_entity';
+  | 'enrich_entity'
+  | 'enrich_text'
+  | 'embed_media';
+
+/** Where a user currently is in the WhatsApp conversation (see 003_conversation_state.sql). */
+export type ConversationStateName =
+  | 'idle'
+  | 'menu'
+  | 'add_collecting'
+  | 'consult_await'
+  | 'awaiting_decision';
 
 /** A pgvector embedding is transported as a plain number[] (length = EMBEDDING_DIMENSIONS). */
 export type Embedding = number[];
@@ -85,6 +95,15 @@ export interface Job {
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+}
+
+/** One user's position in the conversation state machine. */
+export interface ConversationState {
+  userId: UUID;
+  state: ConversationStateName;
+  /** Small bag of per-state data, e.g. { entityId, chatId }. */
+  context: Record<string, unknown>;
+  updatedAt: string;
 }
 
 /* ---- Insert / Update payloads (id + timestamps are DB-generated) ---- */

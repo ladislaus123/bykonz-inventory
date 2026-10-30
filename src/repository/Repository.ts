@@ -7,6 +7,8 @@
  */
 
 import type {
+  ConversationState,
+  ConversationStateName,
   Embedding,
   Entity,
   EntityMatch,
@@ -58,6 +60,16 @@ export interface Repository {
   deleteMedia(id: UUID): Promise<void>;
   /** Cosine similarity search over media embeddings via the match_entity_media RPC. */
   searchMedia(embedding: Embedding, opts?: VectorSearchOptions): Promise<MediaMatch[]>;
+
+  /* ---------------- conversation state machine ---------------- */
+  /** Current state for a user; returns a transient 'idle' default if no row exists yet. */
+  getConversationState(userId: UUID): Promise<ConversationState>;
+  /** Upsert the user's state (and optionally replace its context bag). */
+  setConversationState(
+    userId: UUID,
+    state: ConversationStateName,
+    context?: Record<string, unknown>,
+  ): Promise<ConversationState>;
 
   /* ---------------- jobs (worker queue) ---------------- */
   enqueueJob(input: NewJob): Promise<Job>;

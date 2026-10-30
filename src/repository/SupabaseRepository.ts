@@ -11,6 +11,8 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 import type {
+  ConversationState,
+  ConversationStateName,
   Embedding,
   Entity,
   EntityMatch,
@@ -281,6 +283,36 @@ export class SupabaseRepository implements Repository {
     return (data ?? []) as MediaMatch[];
   }
 
+  /* ======================= conversation state ======================= */
+
+  async getConversationState(userId: UUID): Promise<ConversationState> {
+    const { data, error } = await this.db
+      .from('conversation_states')
+      .select('*')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (error) throw mapError('getConversationState', error);
+    // No row yet == the user has never advanced past the default 'idle' state.
+    if (!data) {
+      return { userId, state: 'idle', context: {}, updatedAt: new Date(0).toISOString() };
+    }
+    return rowToConversationState(data);
+  }
+
+  async setConversationState(
+    userId: UUID,
+    state: ConversationStateName,
+    context: Record<string, unknown> = {},
+  ): Promise<ConversationState> {
+    const { data, error } = await this.db
+      .from('conversation_states')
+      .upsert({ user_id: userId, state, context }, { onConflict: 'user_id' })
+      .select('*')
+      .single();
+    if (error) throw mapError('setConversationState', error);
+    return rowToConversationState(data);
+  }
+
   /* ======================= jobs ======================= */
 
   async enqueueJob(input: NewJob): Promise<Job> {
@@ -447,6 +479,15 @@ function rowToMedia(r: Row): EntityMedia {
     height: r.height ?? null,
     embeddingModel: r.embedding_model ?? null,
     createdAt: r.created_at,
+  };
+}
+
+function rowToConversationState(r: Row): ConversationState {
+  return {
+    userId: r.user_id,
+    state: r.state,
+    context: r.context ?? {},
+    updatedAt: r.updated_at,
   };
 }
 
