@@ -52,6 +52,8 @@ interface TgUser { id: number; is_bot?: boolean; first_name?: string; username?:
 interface TgChat { id: number; type?: string }
 interface TgPhotoSize { file_id: string; file_unique_id: string; width: number; height: number; file_size?: number }
 interface TgDocument { file_id: string; file_name?: string; mime_type?: string }
+interface TgVoice { file_id: string; mime_type?: string; duration?: number }
+interface TgAudio { file_id: string; mime_type?: string; file_name?: string }
 interface TgMessage {
   message_id: number;
   from?: TgUser;
@@ -61,6 +63,8 @@ interface TgMessage {
   caption?: string;
   photo?: TgPhotoSize[];
   document?: TgDocument;
+  voice?: TgVoice;
+  audio?: TgAudio;
 }
 interface TgCallbackQuery {
   id: string;
@@ -232,6 +236,15 @@ export class TelegramTransport implements MessageTransport {
       message.type = mime.startsWith('image/') ? 'image' : 'document';
       if (url) message.media = { url, mimeType: mime, filename: m.document.file_name };
       if (m.caption) message.text = m.caption;
+      return message;
+    }
+
+    // Voice notes and audio files -> 'audio' so the flow transcribes them.
+    const voiceLike = m.voice ?? m.audio;
+    if (voiceLike) {
+      const url = await this.fileUrl(voiceLike.file_id);
+      message.type = 'audio';
+      if (url) message.media = { url, mimeType: voiceLike.mime_type ?? 'audio/ogg' };
       return message;
     }
 
