@@ -143,7 +143,8 @@ export class WhatsAppFlow {
 
         case 'contact_await':
           if (hasDownloadableMedia) {
-            await transport.sendText(msg.chatId, ptBR.contactNeedDetails);
+            // A business-card photo of the person is an optional alternative to text/audio.
+            await this.onContactMedia(msg, user.id, state.context, transport);
           } else {
             await this.onContactProvide(user.id, msg.chatId, text, state.context, transport);
           }
@@ -494,6 +495,41 @@ export class WhatsAppFlow {
     // Back to idle; the worker messages the result when done.
     await this.repo.setConversationState(userId, 'idle', {});
     await transport.sendTyping?.(chatId, false);
+  }
+
+  /** contact_await: a business-card photo of the person — optional alt to text/voice. */
+  private async onContactMedia(
+    msg: IncomingMessage,
+    userId: string,
+    context: Record<string, unknown>,
+    transport: MessageTransport,
+  ): Promise<void> {
+    const entityId = typeof context.entityId === 'string' ? context.entityId : null;
+    if (!entityId) {
+      await this.repo.setConversationState(userId, 'contact_find', {});
+      await transport.sendText(msg.chatId, ptBR.contactFindPrompt);
+      return;
+    }
+
+    // Store the card photo against the business, then extract the person from it.
+    const mediaId = await this.storeCardMedia(msg, userId, entityId, transport);
+    await transport.sendText(msg.chatId, ptBR.contactAnalyzing);
+    await transport.sendTyping?.(msg.chatId, true);
+    const job = await this.repo.enqueueJob({
+      userId,
+      job: 'add_contact',
+      entityId,
+      entityMediaId: mediaId,
+      payload: {
+        chatId: msg.chatId,
+        channel: transport.channel,
+        mediaIds: [mediaId],
+        entityName: context.entityName ?? '',
+      },
+    });
+    log('flow', `contato: add_contact (card photo) job ${job.id} enqueued for entity ${entityId}`);
+    await this.repo.setConversationState(userId, 'idle', {});
+    await transport.sendTyping?.(msg.chatId, false);
   }
 
   /** Called by the worker after contacts are extracted + saved. */

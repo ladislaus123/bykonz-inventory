@@ -12,7 +12,7 @@
  * The entity stays `pending_review`; the WhatsApp accept/deny step confirms it.
  */
 
-import { log } from '../log.js';
+import { log, logErr } from '../log.js';
 import type { EmbeddingClient } from '../embeddings/EmbeddingClient.js';
 import type { Repository } from '../repository/Repository.js';
 import type { NewEntity } from '../types/domain.js';
@@ -68,18 +68,23 @@ const TOOLS: ToolDef[] = [
           contacts: {
             type: 'array',
             description:
-              'ALL contacts found (people, phones, e-mails, departments). Include every ' +
-              'distinct contact — a card may list more than one. phone/email above are the ' +
-              'primary/main contact; put every contact (including the primary) here too.',
+              'Each PERSON associated with the business — a contact card per individual ' +
+              '(e.g. CEO, COO, sócio, diretor, gerente, vendedor, representante, equipe). ' +
+              'Include every named person found, with their role/title and their own phone/email ' +
+              'when available. A single card or description may list more than one person.',
             items: {
               type: 'object',
               properties: {
-                name: { type: 'string', description: 'Contact person name, if any.' },
-                role: { type: 'string', description: 'Job title / department.' },
-                phone: { type: 'string' },
-                email: { type: 'string' },
-                label: { type: 'string', description: 'e.g. comercial, suporte, whatsapp.' },
+                name: { type: 'string', description: 'Full name of the person.' },
+                role: {
+                  type: 'string',
+                  description: 'Role / position / title, e.g. CEO, COO, diretor, gerente, representante.',
+                },
+                phone: { type: 'string', description: "This person's phone, if distinct." },
+                email: { type: 'string', description: "This person's e-mail, if distinct." },
+                label: { type: 'string', description: 'Department / area, e.g. comercial, financeiro.' },
               },
+              required: ['name'],
             },
           },
           metadata: {
@@ -110,7 +115,7 @@ const SYSTEM_PROMPT = `Você é um assistente que cadastra empresas a partir de 
 Quando houver mais de uma imagem, elas podem ser a frente e o verso do mesmo cartão (ou fotos complementares do mesmo negócio): analise todas e combine as informações em um único cadastro.
 Fluxo obrigatório:
 1. Analise a entrada (imagem(ns) ou texto) e extraia/normalize o máximo de informação (nome, telefone, e-mail, site, endereço, segmento).
-   Um negócio pode ter MAIS DE UM contato (várias pessoas, telefones, e-mails, departamentos): identifique TODOS e inclua-os no array contacts de save_business.
+   Um negócio pode ter VÁRIAS PESSOAS de contato (CEO, COO, sócios, diretores, gerentes, vendedores, representantes, equipe). Identifique TODAS as pessoas nomeadas, com nome e cargo/função, e inclua cada uma como um item no array contacts de save_business (com telefone/e-mail próprios quando houver).
 2. Use a ferramenta search_web para confirmar e enriquecer os dados na internet quando útil.
 3. Chame save_business UMA vez com os dados consolidados e normalizados. O campo description deve ser um parágrafo rico em português, pois será usado para busca semântica.
 4. Chame finish com um resumo curto em português para o usuário confirmar.
@@ -271,23 +276,44 @@ export class EnrichmentAgent {
 
     // Persist additional contacts, if the model found any (a card may list more
     // than one). We skip a contact that merely repeats the entity's primary
-    // phone/email with no extra information.
+    // phone/email with no extra information. Best-effort: the business itself is
+    // already saved, so a contacts failure must NOT fail the whole extraction.
     const contacts = normalizeContacts(args.contacts);
     for (const c of contacts) {
       const isPrimaryDup =
         !c.name && !c.role && !c.label && c.phone === patch.phone && c.email === patch.email;
       if (isPrimaryDup) continue;
-      await this.repo.createContact({ entityId, source: 'business_card', ...c });
+      try {
+        await this.repo.createContact({ entityId, source: 'business_card', ...c });
+      } catch (err) {
+        logErr('agent', `saveBusiness: failed to store extra contact for ${entityId} (continuing)`, err);
+      }
     }
   }
 
   /**
-   * Extract one or more contacts from a free-text (or voice-transcribed) message
-   * the user sent to attach to an EXISTING business. Single LLM call, strict JSON
-   * out — no tools, no web search. Returns [] when nothing contact-like is found.
+   * Extract one or more contacts (people) from a message the user sent to attach
+   * to an EXISTING business — free text, a voice transcript, OR photo(s) of a
+   * business card. All inputs are optional; at least one must be present. Single
+   * LLM call, strict JSON out — no tools, no web search. Returns [] when nothing
+   * contact-like is found.
    */
-  async extractContacts(text: string): Promise<ContactInput[]> {
-    if (!text.trim()) return [];
+  async extractContacts(input: { text?: string; imageUrls?: string[] }): Promise<ContactInput[]> {
+    const text = input.text?.trim() ?? '';
+    const images = input.imageUrls ?? [];
+    if (!text && images.length === 0) return [];
+
+    const userContent: ContentPart[] = [];
+    if (images.length) {
+      userContent.push({
+        type: 'text',
+        text: 'Extraia as pessoas de contato destes cartões de visita / imagens.',
+      });
+      for (const url of images) userContent.push({ type: 'image_url', image_url: { url } });
+    } else {
+      userContent.push({ type: 'text', text });
+    }
+
     const res = await this.chat.complete({
       model: this.cfg.model,
       temperature: 0,
@@ -295,12 +321,14 @@ export class EnrichmentAgent {
         {
           role: 'system',
           content:
-            'Extraia os contatos do texto do usuário (pessoas, telefones, e-mails, cargos, ' +
-            'departamentos). Pode haver mais de um contato. Responda APENAS com um array JSON; ' +
-            'cada item: {"name"?, "role"?, "phone"?, "email"?, "label"?}. Normalize telefones e ' +
-            'e-mails. Se não houver nenhum contato, responda [].',
+            'Extraia as PESSOAS de contato da entrada do usuário (texto OU imagens de cartões ' +
+            'de visita) — cada pessoa é um contato (ex.: CEO, COO, sócio, diretor, gerente, ' +
+            'vendedor, representante, equipe), com seu nome e cargo/função. Pode haver mais de ' +
+            'uma pessoa. Responda APENAS com um array JSON; cada item: ' +
+            '{"name", "role"?, "phone"?, "email"?, "label"?}. Normalize telefones e e-mails. ' +
+            'Se não houver nenhuma pessoa de contato, responda [].',
         },
-        { role: 'user', content: text.trim() },
+        { role: 'user', content: userContent },
       ],
     });
     const raw = typeof res.content === 'string' ? res.content : '';

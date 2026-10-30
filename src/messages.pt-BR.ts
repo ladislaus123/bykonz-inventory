@@ -128,14 +128,16 @@ export const ptBR = {
       label?: string | null;
     }>,
   ) => {
-    const lines = ['👥 *Outros contatos:*'];
+    const lines = ['👥 *Pessoas de contato:*'];
     for (const c of contacts) {
-      const title = [c.name, c.role].filter(Boolean).join(' — ') || c.label || 'Contato';
+      // Lead with the person's name, then role (CEO, diretor, …).
+      const who = c.name || c.role || c.label || 'Contato';
+      const role = c.name && c.role ? ` — _${c.role}_` : '';
       const bits: string[] = [];
       if (c.phone) bits.push(`📞 ${c.phone}`);
       if (c.email) bits.push(`✉️ ${c.email}`);
       const detail = bits.length ? ` (${bits.join(', ')})` : '';
-      lines.push(`• ${title}${detail}`);
+      lines.push(`• *${who}*${role}${detail}`);
     }
     return lines.join('\n');
   },
@@ -143,30 +145,32 @@ export const ptBR = {
   /* ---- Adicionar contato ---- */
 
   contactFindPrompt:
-    'A qual negócio você quer adicionar um contato? 👤 Descreva o negócio (nome ou segmento) ' +
-    'que eu localizo para você.',
+    'A qual negócio você quer adicionar uma pessoa de contato? 👤 Descreva o negócio ' +
+    '(nome ou segmento) que eu localizo para você.',
 
   contactNotFound:
     'Não encontrei um negócio parecido. 😕 Tente descrever de outro jeito, ou cadastre o ' +
     'negócio primeiro pelo menu (*oi* → *1*).',
 
   contactFoundAsk: (name: string) =>
-    `Encontrei *${name}*. 👤 Agora me envie os dados do novo contato — nome, cargo, telefone ` +
-    'e/ou e-mail. Pode escrever em texto ou mandar um *áudio*.',
+    `Encontrei *${name}*. 👤 Agora me envie a pessoa de contato — *nome* e *cargo* ` +
+    '(ex.: CEO, diretor, gerente, representante) e, se tiver, telefone e e-mail. ' +
+    'Pode mandar em *texto*, *áudio* ou a *foto do cartão* da pessoa. (Mais de uma também.)',
 
   contactNeedDetails:
-    'Me envie os dados do contato em *texto* ou *áudio* (nome, cargo, telefone, e-mail).',
+    'Me envie a pessoa de contato em *texto*, *áudio* ou *foto do cartão*: nome, cargo ' +
+    '(ex.: CEO, gerente) e, se tiver, telefone e e-mail.',
 
-  contactAnalyzing: 'Anotado! 🔎 Estou identificando os dados do contato…',
+  contactAnalyzing: 'Anotado! 🔎 Estou identificando a pessoa de contato…',
 
   contactNone:
-    'Não consegui identificar um contato na sua mensagem. 😕 Tente novamente informando nome, ' +
-    'telefone e/ou e-mail.',
+    'Não consegui identificar uma pessoa de contato na sua mensagem. 😕 Tente novamente ' +
+    'informando ao menos o *nome* e o *cargo*.',
 
   contactSaved: (count: number, name: string) =>
     count === 1
-      ? `Pronto! ✅ Adicionei 1 contato ao negócio *${name}*.`
-      : `Pronto! ✅ Adicionei ${count} contatos ao negócio *${name}*.`,
+      ? `Pronto! ✅ Adicionei 1 pessoa de contato ao negócio *${name}*.`
+      : `Pronto! ✅ Adicionei ${count} pessoas de contato ao negócio *${name}*.`,
 
   /* ---- voz (Deepgram) ---- */
 

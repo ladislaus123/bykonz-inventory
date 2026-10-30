@@ -159,7 +159,7 @@ export class Worker {
     log('worker', `job ${job.id} done: embedded media ${media.id} (${vec.length} dims)`);
   }
 
-  /** Adicionar contato: extract contact(s) from free text/voice and attach them. */
+  /** Adicionar contato: extract contact(s) from free text/voice OR a card photo. */
   private async runAddContact(job: Job): Promise<void> {
     if (!job.entityId) throw new Error('add_contact job missing entityId');
     const text = String(job.payload.text ?? '');
@@ -167,7 +167,19 @@ export class Worker {
     const channel: Channel = job.payload.channel === 'telegram' ? 'telegram' : 'whatsapp';
     const entityName = String(job.payload.entityName ?? '') || (await this.entityName(job.entityId));
 
-    const contacts = await this.agent.extractContacts(text);
+    // Photo path: sign the stored card image(s) so the agent can read them.
+    const mediaIds = Array.isArray(job.payload.mediaIds)
+      ? (job.payload.mediaIds as string[]).filter((id) => typeof id === 'string')
+      : [];
+    const imageUrls: string[] = [];
+    for (const id of mediaIds) {
+      const media = await this.repo.getMediaById(id);
+      if (media) imageUrls.push(await this.storage.getSignedUrl(media.storageUrl, 600));
+    }
+
+    const contacts = await this.agent.extractContacts(
+      imageUrls.length ? { imageUrls } : { text },
+    );
     for (const c of contacts) {
       await this.repo.createContact({ entityId: job.entityId, source: 'manual', ...c });
     }
