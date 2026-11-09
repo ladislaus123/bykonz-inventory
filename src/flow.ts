@@ -31,13 +31,14 @@ import { ptBR } from './messages.pt-BR.js';
 import type { EmbeddingClient } from './embeddings/EmbeddingClient.js';
 import type { Repository } from './repository/Repository.js';
 import type { Storage } from './storage/Storage.js';
-import type { EntityMatch } from './types/domain.js';
+import type { Collection, Entity, EntityMatch } from './types/domain.js';
 import type { Channel, IncomingMessage, MessageTransport } from './transport/MessageTransport.js';
 import type { TransportRouter } from './transport/TransportRouter.js';
 import type { VoiceTranscriber } from './voice/DeepgramClient.js';
 
 /** Consultar tuning. */
 const CONSULT_MAX_RESULTS = 3; // businesses shown to the user
+const CONSULT_COLLECTION_MAX = 10; // businesses shown when listing a whole collection
 const CONSULT_MAX_MEDIA = 3; // images per business
 const CONSULT_CANDIDATES = 8; // vector candidates fetched before reranking
 const CONSULT_MIN_SIMILARITY = 0.25; // floor to drop obvious noise pre-rerank
@@ -135,7 +136,7 @@ export class WhatsAppFlow {
           if (hasDownloadableMedia) {
             // Expecting a name, not a photo — nudge, but keep any photo useful by
             // telling them to name the collection first.
-            await transport.sendText(msg.chatId, ptBR.collectionPrompt);
+            await transport.sendText(msg.chatId, ptBR.collectionPrompt());
           } else {
             await this.onCollectionName(user.id, msg.chatId, text, transport);
           }
@@ -225,7 +226,7 @@ export class WhatsAppFlow {
   ): Promise<void> {
     const name = text.trim();
     if (!name) {
-      await transport.sendText(chatId, ptBR.collectionPrompt);
+      await transport.sendText(chatId, ptBR.collectionPrompt());
       return;
     }
     // "nenhuma" / "limpar" / "remover" stops grouping.
@@ -263,7 +264,8 @@ export class WhatsAppFlow {
       await transport.sendText(chatId, ptBR.cardAwaitPrompt);
     } else if (choice === 'collection') {
       await this.repo.setConversationState(userId, 'collection_await', {});
-      await transport.sendText(chatId, ptBR.collectionPrompt);
+      const active = await this.activeCollection(userId);
+      await transport.sendText(chatId, ptBR.collectionPrompt(active?.name));
     } else if (choice === 'consult') {
       await this.repo.setConversationState(userId, 'consult_await', {});
       await transport.sendText(chatId, ptBR.consultPrompt);
@@ -374,18 +376,47 @@ export class WhatsAppFlow {
     await transport.sendText(chatId, ptBR.consultSearching);
     await transport.sendTyping?.(chatId, true);
 
-    const matches = (await this.searchConfirmed(query)).slice(0, CONSULT_MAX_RESULTS);
+    // Does the query name one of THIS user's collections? ("negócios da Feira Rio
+    // 2022"). The agent gets the collection names and decides; if so, we scope
+    // the results to that collection instead of the global semantic search.
+    const collections = await this.repo.listCollectionsByUser(userId);
+    const resolved = collections.length ? await this.resolveCollection(query, collections) : null;
 
-    // Back to idle regardless of outcome; a new "oi" reopens the menu.
-    await this.repo.setConversationState(userId, 'idle', {});
-    await transport.sendTyping?.(chatId, false);
+    let matches: EntityMatch[];
+    let header: string;
 
-    if (matches.length === 0) {
-      await transport.sendText(chatId, ptBR.consultNoResults);
-      return;
+    if (resolved) {
+      const entities = await this.repo.listEntitiesByCollection(resolved.collection.id, {
+        status: 'confirmed',
+        limit: 50,
+      });
+      await this.repo.setConversationState(userId, 'idle', {});
+      await transport.sendTyping?.(chatId, false);
+      if (entities.length === 0) {
+        await transport.sendText(chatId, ptBR.consultCollectionEmpty(resolved.collection.name));
+        return;
+      }
+      const candidates = entities.map(entityToMatch);
+      // If the user asked for something specific WITHIN the collection, rerank by it.
+      const ranked = resolved.residual
+        ? await this.rerankMatches(resolved.residual, candidates)
+        : candidates;
+      matches = ranked.slice(0, CONSULT_COLLECTION_MAX);
+      header = ptBR.consultCollectionHeader(resolved.collection.name, matches.length);
+      log('flow', `consultar: scoped to collection "${resolved.collection.name}" -> ${matches.length} result(s)`);
+    } else {
+      matches = (await this.searchConfirmed(query)).slice(0, CONSULT_MAX_RESULTS);
+      // Back to idle regardless of outcome; a new "oi" reopens the menu.
+      await this.repo.setConversationState(userId, 'idle', {});
+      await transport.sendTyping?.(chatId, false);
+      if (matches.length === 0) {
+        await transport.sendText(chatId, ptBR.consultNoResults);
+        return;
+      }
+      header = ptBR.consultHeader(matches.length);
     }
 
-    await transport.sendText(chatId, ptBR.consultHeader(matches.length));
+    await transport.sendText(chatId, header);
     for (const match of matches) {
       const entity = await this.repo.getEntityById(match.id);
       if (!entity) continue;
@@ -414,6 +445,52 @@ export class WhatsAppFlow {
    * confirmed businesses (shared directory), then rerank down to the ones that
    * actually satisfy the query. Used by Consultar and by "Adicionar contato".
    */
+  /**
+   * Decide whether the user's natural-language query refers to one of their
+   * collections. The agent receives the collection NAMES as context and returns
+   * the matched one (even on a loose/typo'd reference like "rio fair 2022" ->
+   * "Feira Rio 2022") plus the residual query — the part that is NOT the
+   * collection name, used to rank businesses within it. Returns null when the
+   * query doesn't point at any collection (normal semantic search then runs).
+   */
+  private async resolveCollection(
+    query: string,
+    collections: Collection[],
+  ): Promise<{ collection: Collection; residual: string } | null> {
+    const list = collections.map((c, i) => `${i + 1}. ${c.name}`).join('\n');
+    try {
+      const res = await this.chat.complete({
+        model: this.rerankModel,
+        temperature: 0,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'O usuário está buscando negócios que ele cadastrou. Ele PODE estar se referindo ' +
+              'a uma COLEÇÃO (um grupo de cartões que ele coletou num lugar/evento), ou pode ser ' +
+              'uma busca comum por tipo de negócio.\n\n' +
+              `Coleções do usuário:\n${list}\n\n` +
+              'Se a busca se referir a uma dessas coleções — mesmo que o nome não seja exato ' +
+              '(ex.: "rio fair 2022" ou "feira do rio" se referem a "Feira Rio 2022") — responda ' +
+              'o NÚMERO dela. Se não se referir a nenhuma, responda 0. Em "query", devolva a parte ' +
+              'da busca que NÃO é o nome da coleção (o que procurar dentro dela); se não sobrar ' +
+              'nada, use string vazia.\n\n' +
+              'Responda APENAS com JSON: {"collection": <numero ou 0>, "query": "<restante>"}.',
+          },
+          { role: 'user', content: query },
+        ],
+      });
+      const raw = typeof res.content === 'string' ? res.content : '';
+      const parsed = parseCollectionPick(raw, collections.length);
+      if (!parsed || parsed.n === 0) return null;
+      log('flow', `consultar: query "${query}" -> collection #${parsed.n} residual="${parsed.query}"`);
+      return { collection: collections[parsed.n - 1]!, residual: parsed.query.trim() };
+    } catch (err) {
+      logErr('flow', 'consultar: collection resolution failed, using semantic search', err);
+      return null;
+    }
+  }
+
   private async searchConfirmed(query: string): Promise<EntityMatch[]> {
     const vec = await this.embeddings.embedText(query);
     const candidates = await this.repo.searchEntities(vec, {
@@ -685,7 +762,17 @@ export class WhatsAppFlow {
       const vec = await this.embeddings.embedText(entity.description);
       await this.repo.setEntityEmbedding(entity.id, vec, this.embeddings.model);
     }
-    await transport.sendText(chatId, ptBR.saved);
+    // Tell the user which business was saved and (if any) which collection it
+    // joined. Park in `menu` so the inline "5 = trocar coleção" / "0 = menu"
+    // shortcuts work, while sending another card still continues scanning.
+    const collection = entity.collectionId
+      ? await this.repo.getCollectionById(entity.collectionId)
+      : null;
+    await this.repo.setConversationState(userId, 'menu', {});
+    await transport.sendText(
+      chatId,
+      ptBR.saved({ entityName: entity.name, collectionName: collection?.name }),
+    );
   }
 
   /* ===================== business-card flow 1 ===================== */
@@ -900,6 +987,40 @@ function parseScoreMap(text: string, max: number): number[] | null {
   // Higher score first; preserve the candidates' (similarity) order within a tie.
   scored.sort((a, b) => b.s - a.s || a.n - b.n);
   return scored.map((x) => x.n);
+}
+
+/** Adapt a full Entity into the EntityMatch shape the renderer/reranker expect. */
+function entityToMatch(e: Entity): EntityMatch {
+  return {
+    id: e.id,
+    name: e.name,
+    description: e.description,
+    metadata: e.metadata,
+    status: e.status,
+    createdBy: e.createdBy,
+    similarity: 1, // not a vector hit; it's a direct collection membership
+  };
+}
+
+/**
+ * Parse the collection resolver's `{"collection": n, "query": "..."}` reply.
+ * Returns null if no JSON object is found; n === 0 means "no collection".
+ */
+function parseCollectionPick(text: string, max: number): { n: number; query: string } | null {
+  const m = text.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(m[0]);
+  } catch {
+    return null;
+  }
+  if (typeof obj !== 'object' || obj === null) return null;
+  const rec = obj as Record<string, unknown>;
+  const n = Number(rec.collection);
+  if (!Number.isInteger(n) || n < 0 || n > max) return null;
+  const query = typeof rec.query === 'string' ? rec.query : '';
+  return { n, query };
 }
 
 function parseDecision(text: string): 'accept' | 'reject' | null {

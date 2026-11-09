@@ -80,6 +80,11 @@ export interface Repository {
   listCollectionsByUser(userId: UUID): Promise<Collection[]>;
   /** Resolve-or-create a collection by name for the user (idempotent per name). */
   upsertCollectionByName(userId: UUID, name: string): Promise<Collection>;
+  /** All entities stamped with a collection (newest first), optionally by status. */
+  listEntitiesByCollection(
+    collectionId: UUID,
+    opts?: { status?: EntityStatus; limit?: number },
+  ): Promise<Entity[]>;
 
   /* ---------------- conversation state machine ---------------- */
   /** Current state for a user; returns a transient 'idle' default if no row exists yet. */

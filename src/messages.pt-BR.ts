@@ -65,7 +65,22 @@ export const ptBR = {
   accept: 'Aceitar',
   reject: 'Recusar',
 
-  saved: 'Pronto! As informações foram salvas. Pode enviar outro cartão quando quiser.',
+  saved: (opts: { entityName: string; collectionName?: string | null }) => {
+    const name = opts.entityName?.trim() || 'O negócio';
+    if (opts.collectionName) {
+      return (
+        `Pronto! *${name}* foi adicionada à coleção *${opts.collectionName}*.\n\n` +
+        'Envie outro cartão para continuar nesta coleção, mande *5* para trocar de coleção, ' +
+        'ou *0* para voltar ao menu.'
+      );
+    }
+    return (
+      `Pronto! *${name}* foi salva.\n\n` +
+      'Envie outro cartão quando quiser, mande *5* para agrupá-los em uma coleção, ' +
+      'ou *0* para voltar ao menu.'
+    );
+  },
+
   discarded: 'Tudo bem, descartei essas informações. Envie outra foto quando quiser.',
 
   notUnderstood:
@@ -99,7 +114,8 @@ export const ptBR = {
 
   /* ---- Coleções ---- */
 
-  collectionPrompt:
+  collectionPrompt: (current?: string | null) =>
+    (current ? `Coleção atual: *${current}*.\n\n` : '') +
     'Dê um nome para a coleção onde você quer agrupar os cartões — por exemplo: ' +
     '"Feira Rio 2022". Os próximos cartões que você escanear entram nessa coleção.\n\n' +
     'Digite *nenhuma* para parar de agrupar.\n\n' +
@@ -154,6 +170,17 @@ export const ptBR = {
     count === 1
       ? 'Encontrei *1* negócio para você:'
       : `Encontrei *${count}* negócios para você:`,
+
+  /** Header when the query was resolved to a collection. */
+  consultCollectionHeader: (name: string, count: number) =>
+    count === 1
+      ? `Na coleção *${name}* encontrei *1* negócio:`
+      : `Na coleção *${name}* encontrei *${count}* negócios:`,
+
+  consultCollectionEmpty: (name: string) =>
+    `A coleção *${name}* ainda não tem negócios confirmados. ` +
+    'Escaneie cartões com essa coleção ativa para preenchê-la.\n\n' +
+    BACK,
 
   /** One result block (business details), rendered before its images. */
   consultResult: (e: {

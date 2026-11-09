@@ -5,17 +5,16 @@
  * (set WHATSAPP_HOOK_URL / webhook config on the WAHA side).
  */
 
-import express from 'express';
-
 import { EnrichmentAgent } from './agent/EnrichmentAgent.js';
 import { OpenRouterChat } from './agent/OpenRouterChat.js';
 import { config } from './config.js';
-import { log, logErr } from './log.js';
+import { log } from './log.js';
 import { EmbeddingClient } from './embeddings/EmbeddingClient.js';
 import { WhatsAppFlow } from './flow.js';
+import { createHttpApp } from './http.js';
 import { SupabaseRepository } from './repository/SupabaseRepository.js';
 import { createStorage } from './storage/index.js';
-import { TELEGRAM_WEBHOOK_PATH, TelegramTransport } from './transport/TelegramTransport.js';
+import { TelegramTransport } from './transport/TelegramTransport.js';
 import { TransportRouter } from './transport/TransportRouter.js';
 import { WahaTransport } from './transport/WahaTransport.js';
 import { DeepgramClient } from './voice/DeepgramClient.js';
@@ -70,73 +69,11 @@ async function main() {
     worker.start();
   }
 
-  const app = express();
-  app.use(express.json({ limit: '25mb' }));
-
-  app.get('/health', (_req, res) => res.json({ ok: true }));
-
-  // WAHA is webhook-driven; Telegram uses its own long-polling loop (no route).
-  if (wahaTransport) {
-    const waha = wahaTransport;
-
-    // Reachability test: open this in a browser to confirm the server is public.
-    app.get('/webhook/waha', (_req, res) => {
-      log('webhook', 'GET /webhook/waha (reachability check)');
-      res.json({ ok: true, hint: 'POST WAHA message events here' });
-    });
-
-    app.post('/webhook/waha', async (req, res) => {
-      const event = (req.body as { event?: string })?.event;
-      const msgId = (req.body as { payload?: { id?: string } })?.payload?.id;
-      log('webhook', `received event=${event ?? '?'} id=${msgId ?? '-'}`);
-
-      // Optional shared-secret check (configure the same value on WAHA).
-      if (config.server.webhookSecret) {
-        const got = req.header('x-api-key');
-        if (got !== config.server.webhookSecret) {
-          logErr('webhook', 'rejected: bad x-api-key');
-          return res.sendStatus(401);
-        }
-      }
-      // Ack immediately; process asynchronously so WAHA doesn't retry on slow work.
-      res.sendStatus(200);
-      try {
-        await waha.handleWebhook(req.body);
-      } catch (err) {
-        logErr('webhook', 'handling failed', err);
-      }
-    });
-  }
-
-  // Telegram webhook mode: set TELEGRAM_WEBHOOK_URL=https://<host>/webhook/telegram
-  // (the transport registers it via setWebhook on start). Without that env var the
-  // Telegram transport long-polls instead and this route is simply unused.
-  if (telegramTransport) {
-    const tg = telegramTransport;
-
-    app.get(TELEGRAM_WEBHOOK_PATH, (_req, res) => {
-      log('webhook', `GET ${TELEGRAM_WEBHOOK_PATH} (reachability check)`);
-      res.json({ ok: true, hint: 'POST Telegram updates here' });
-    });
-
-    app.post(TELEGRAM_WEBHOOK_PATH, async (req, res) => {
-      // Verify the secret Telegram echoes back, if one is configured.
-      if (tg.webhookSecret) {
-        const got = req.header('x-telegram-bot-api-secret-token');
-        if (got !== tg.webhookSecret) {
-          logErr('webhook', 'telegram: rejected bad secret token');
-          return res.sendStatus(401);
-        }
-      }
-      // Ack immediately; process async so Telegram doesn't retry on slow work.
-      res.sendStatus(200);
-      try {
-        await tg.handleWebhook(req.body);
-      } catch (err) {
-        logErr('webhook', 'telegram handling failed', err);
-      }
-    });
-  }
+  const app = createHttpApp({
+    waha: wahaTransport,
+    telegram: telegramTransport,
+    webhookSecret: config.server.webhookSecret,
+  });
 
   app.listen(config.server.port, () => {
     console.log(`bykonz webhook server listening on :${config.server.port}`);

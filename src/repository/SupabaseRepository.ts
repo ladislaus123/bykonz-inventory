@@ -379,6 +379,22 @@ export class SupabaseRepository implements Repository {
     return this.createCollection({ name: name.trim(), createdBy: userId });
   }
 
+  async listEntitiesByCollection(
+    collectionId: UUID,
+    opts?: { status?: EntityStatus; limit?: number },
+  ): Promise<Entity[]> {
+    let q = this.db
+      .from('entities')
+      .select(ENTITY_COLS)
+      .eq('collection_id', collectionId)
+      .order('created_at', { ascending: false })
+      .limit(opts?.limit ?? 50);
+    if (opts?.status) q = q.eq('status', opts.status);
+    const { data, error } = await q;
+    if (error) throw mapError('listEntitiesByCollection', error);
+    return (data ?? []).map(rowToEntity);
+  }
+
   /* ======================= conversation state ======================= */
 
   async getConversationState(userId: UUID): Promise<ConversationState> {
