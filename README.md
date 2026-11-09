@@ -112,7 +112,8 @@ Additive migration on top of `001_init.sql`:
 ```bash
 cp .env.example .env    # fill in Supabase, OpenRouter, WAHA
 # apply SQL in your Supabase SQL editor / psql, in order:
-#   001_init.sql  then  002_enrich_schema.sql  then  003_conversation_state.sql
+#   001_init.sql, 002_enrich_schema.sql, 003_conversation_state.sql,
+#   004_card_collecting.sql, 005_contacts_and_voice.sql, 006_card_await.sql
 npm install
 npm run dev             # starts the webhook server
 ```
