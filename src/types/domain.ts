@@ -23,6 +23,7 @@ export type JobType =
 export type ConversationStateName =
   | 'idle'
   | 'menu'
+  | 'card_await'
   | 'card_collecting'
   | 'add_collecting'
   | 'consult_await'

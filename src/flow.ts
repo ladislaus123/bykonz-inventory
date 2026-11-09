@@ -110,6 +110,12 @@ export class WhatsAppFlow {
           else await this.onMenuChoice(user.id, msg.chatId, text, transport);
           return;
 
+        case 'card_await':
+          // User explicitly chose "Adicionar cartão": the next photo IS a card.
+          if (hasDownloadableMedia) await this.onCardPhoto(msg, user.id, transport);
+          else await transport.sendText(msg.chatId, ptBR.cardAwaitPrompt);
+          return;
+
         case 'card_collecting':
           if (hasDownloadableMedia) {
             // Another photo of the same card (back, extra angle) — attach it.
@@ -196,6 +202,9 @@ export class WhatsAppFlow {
     const choice = parseMenuChoice(text);
     if (choice === 'add') {
       await this.enterAdicionar(userId, chatId, transport);
+    } else if (choice === 'card') {
+      await this.repo.setConversationState(userId, 'card_await', {});
+      await transport.sendText(chatId, ptBR.cardAwaitPrompt);
     } else if (choice === 'consult') {
       await this.repo.setConversationState(userId, 'consult_await', {});
       await transport.sendText(chatId, ptBR.consultPrompt);
@@ -776,10 +785,12 @@ function isFinishWord(text: string): boolean {
   return /^(pronto|finalizar|concluir|terminar|fim|ok)$/i.test(text.trim());
 }
 
-function parseMenuChoice(text: string): 'add' | 'consult' | 'contact' | null {
+function parseMenuChoice(text: string): 'add' | 'card' | 'consult' | 'contact' | null {
   const t = text.trim().toLowerCase();
   // Check "contato" before "consultar" so "con…" variants don't collide.
   if (/^(3|contato|adicionar contato)\b/.test(t)) return 'contact';
+  // Check "cartão" before "adicionar" so "adicionar cartão" isn't read as plain add.
+  if (/^(4|cart[ãa]o|adicionar cart[ãa]o)\b/.test(t)) return 'card';
   if (/^(1|adicionar|add|cadastrar)\b/.test(t)) return 'add';
   if (/^(2|consultar|buscar|procurar|pesquisar)\b/.test(t)) return 'consult';
   return null;

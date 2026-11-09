@@ -57,12 +57,19 @@ export const ptBR = {
     'O que você deseja fazer?\n\n' +
     '*1* — Adicionar um negócio ➕\n' +
     '*2* — Consultar negócios 🔎\n' +
-    '*3* — Adicionar um contato a um negócio 👤\n\n' +
-    'Responda com *1*, *2* ou *3*. (Você também pode enviar a foto de um cartão — ou ' +
+    '*3* — Adicionar um contato a um negócio 👤\n' +
+    '*4* — Adicionar um cartão de visita 📇\n\n' +
+    'Responda com *1*, *2*, *3* ou *4*. (Você também pode enviar a foto de um cartão — ou ' +
     'um áudio — a qualquer momento.)',
 
   menuNotUnderstood:
-    'Não entendi a opção. Responda com *1* (Adicionar), *2* (Consultar) ou *3* (Adicionar contato).',
+    'Não entendi a opção. Responda com *1* (Adicionar negócio), *2* (Consultar), ' +
+    '*3* (Adicionar contato) ou *4* (Adicionar cartão).',
+
+  /** Prompt after the user chooses "Adicionar cartão" from the menu. */
+  cardAwaitPrompt:
+    'Certo! 📇 Envie agora a *foto do cartão de visita*. Se o cartão tiver *verso* ' +
+    '(ou mais fotos), você poderá enviá-las em seguida. 📸',
 
   addPrompt:
     'Certo! ➕ Descreva o negócio em *texto* — nome e qualquer informação relevante ' +
