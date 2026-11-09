@@ -131,6 +131,16 @@ export class WhatsAppFlow {
           else await this.onAddText(user.id, msg.chatId, text, state.context, transport);
           return;
 
+        case 'collection_await':
+          if (hasDownloadableMedia) {
+            // Expecting a name, not a photo — nudge, but keep any photo useful by
+            // telling them to name the collection first.
+            await transport.sendText(msg.chatId, ptBR.collectionPrompt);
+          } else {
+            await this.onCollectionName(user.id, msg.chatId, text, transport);
+          }
+          return;
+
         case 'consult_await':
           if (hasDownloadableMedia) {
             await transport.sendText(msg.chatId, ptBR.consultPrompt);
@@ -190,7 +200,53 @@ export class WhatsAppFlow {
 
   private async showMenu(userId: string, chatId: string, transport: MessageTransport): Promise<void> {
     await this.repo.setConversationState(userId, 'menu', {});
-    await transport.sendText(chatId, ptBR.menu);
+    let body = ptBR.menu;
+    // Show the active collection so the user knows where scanned cards land.
+    const active = await this.activeCollection(userId);
+    if (active) body += ptBR.menuActiveCollection(active.name);
+    await transport.sendText(chatId, body);
+  }
+
+  /** The collection newly scanned cards are stamped with, or null if none set. */
+  private async activeCollection(userId: string) {
+    const user = await this.repo.getUserById(userId);
+    if (!user?.activeCollectionId) return null;
+    return this.repo.getCollectionById(user.activeCollectionId);
+  }
+
+  /* ===================== Coleções ===================== */
+
+  /** collection_await: set/clear the user's active collection by name. */
+  private async onCollectionName(
+    userId: string,
+    chatId: string,
+    text: string,
+    transport: MessageTransport,
+  ): Promise<void> {
+    const name = text.trim();
+    if (!name) {
+      await transport.sendText(chatId, ptBR.collectionPrompt);
+      return;
+    }
+    // "nenhuma" / "limpar" / "remover" stops grouping.
+    if (/^(nenhuma|nenhum|limpar|remover|parar|sair)$/i.test(name)) {
+      await this.repo.updateUser(userId, { activeCollectionId: null });
+      await this.repo.setConversationState(userId, 'idle', {});
+      await transport.sendText(chatId, ptBR.collectionCleared);
+      return;
+    }
+    const collection = await this.repo.upsertCollectionByName(userId, name);
+    await this.repo.updateUser(userId, { activeCollectionId: collection.id });
+    // Back to idle so the user can immediately send the cards to be grouped.
+    await this.repo.setConversationState(userId, 'idle', {});
+    log('flow', `collection: user ${userId} active collection -> ${collection.id} (${collection.name})`);
+    await transport.sendText(chatId, ptBR.collectionSet(collection.name));
+  }
+
+  /** The user's active collection id, if any — stamped onto new entities. */
+  private async activeCollectionId(userId: string): Promise<string | undefined> {
+    const user = await this.repo.getUserById(userId);
+    return user?.activeCollectionId ?? undefined;
   }
 
   private async onMenuChoice(
@@ -205,6 +261,9 @@ export class WhatsAppFlow {
     } else if (choice === 'card') {
       await this.repo.setConversationState(userId, 'card_await', {});
       await transport.sendText(chatId, ptBR.cardAwaitPrompt);
+    } else if (choice === 'collection') {
+      await this.repo.setConversationState(userId, 'collection_await', {});
+      await transport.sendText(chatId, ptBR.collectionPrompt);
     } else if (choice === 'consult') {
       await this.repo.setConversationState(userId, 'consult_await', {});
       await transport.sendText(chatId, ptBR.consultPrompt);
@@ -224,6 +283,7 @@ export class WhatsAppFlow {
       name: 'Novo cadastro',
       status: 'pending_review',
       source: 'manual',
+      collectionId: await this.activeCollectionId(userId),
       createdBy: userId,
     });
     log('flow', `adicionar: draft entity ${entity.id} created for user ${userId}`);
@@ -643,6 +703,7 @@ export class WhatsAppFlow {
       name: 'Novo cadastro',
       status: 'pending_review',
       source: 'business_card',
+      collectionId: await this.activeCollectionId(userId),
       createdBy: userId,
     });
 
@@ -800,12 +861,13 @@ function isFinishWord(text: string): boolean {
   return /^(pronto|finalizar|concluir|terminar|fim|ok)$/i.test(text.trim());
 }
 
-function parseMenuChoice(text: string): 'add' | 'card' | 'consult' | 'contact' | null {
+function parseMenuChoice(text: string): 'add' | 'card' | 'consult' | 'contact' | 'collection' | null {
   const t = text.trim().toLowerCase();
   // Check "contato" before "consultar" so "con…" variants don't collide.
   if (/^(3|contato|adicionar contato)\b/.test(t)) return 'contact';
   // Check "cartão" before "adicionar" so "adicionar cartão" isn't read as plain add.
   if (/^(4|cart[ãa]o|adicionar cart[ãa]o)\b/.test(t)) return 'card';
+  if (/^(5|cole[çc][ãa]o|cole[çc][õo]es|agrupar)\b/.test(t)) return 'collection';
   if (/^(1|adicionar|add|cadastrar)\b/.test(t)) return 'add';
   if (/^(2|consultar|buscar|procurar|pesquisar)\b/.test(t)) return 'consult';
   return null;

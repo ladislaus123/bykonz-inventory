@@ -29,6 +29,7 @@ export type ConversationStateName =
   | 'consult_await'
   | 'contact_find'
   | 'contact_await'
+  | 'collection_await'
   | 'awaiting_decision';
 
 /** A pgvector embedding is transported as a plain number[] (length = EMBEDDING_DIMENSIONS). */
@@ -41,8 +42,29 @@ export interface User {
   waId: string | null;
   locale: string;
   lastSeenAt: string | null;
+  /** The collection newly scanned cards are stamped with, if the user set one. */
+  activeCollectionId: UUID | null;
   createdAt: string;
 }
+
+/** A named grouping for collected cards (a fair, a trip, a client visit, …). */
+export interface Collection {
+  id: UUID;
+  name: string;
+  notes: string | null;
+  collectedOn: string | null;
+  location: string | null;
+  createdBy: UUID;
+  createdAt: string;
+}
+
+export type NewCollection = {
+  name: string;
+  notes?: string | null;
+  collectedOn?: string | null;
+  location?: string | null;
+  createdBy: UUID;
+};
 
 export interface Entity {
   id: UUID;
@@ -61,6 +83,7 @@ export interface Entity {
   enrichment: Record<string, unknown>;
   embeddingModel: string | null;
   embeddingDim: number | null;
+  collectionId: UUID | null;
   createdBy: UUID;
   createdAt: string;
   modifiedAt: string;
@@ -147,6 +170,7 @@ export type NewEntity = {
   category?: string | null;
   confidence?: number | null;
   enrichment?: Record<string, unknown>;
+  collectionId?: UUID | null;
   createdBy: UUID;
 };
 

@@ -7,6 +7,7 @@
  */
 
 import type {
+  Collection,
   ConversationState,
   ConversationStateName,
   Embedding,
@@ -15,6 +16,7 @@ import type {
   EntityMatch,
   EntityMedia,
   EntityStatus,
+  NewCollection,
   NewEntityContact,
   Job,
   JobStatus,
@@ -40,7 +42,10 @@ export interface Repository {
   getUserByWaId(waId: string): Promise<User | null>;
   /** Create-or-return the user for a WhatsApp id (first-contact convenience). */
   upsertUserByWaId(waId: string, defaults: NewUser): Promise<User>;
-  updateUser(id: UUID, patch: Partial<NewUser> & { lastSeenAt?: string }): Promise<User>;
+  updateUser(
+    id: UUID,
+    patch: Partial<NewUser> & { lastSeenAt?: string; activeCollectionId?: UUID | null },
+  ): Promise<User>;
 
   /* ---------------- entities ---------------- */
   createEntity(input: NewEntity): Promise<Entity>;
@@ -66,6 +71,15 @@ export interface Repository {
   /* ---------------- entity_contacts (extra contacts per business) ---------------- */
   createContact(input: NewEntityContact): Promise<EntityContact>;
   listContactsByEntity(entityId: UUID): Promise<EntityContact[]>;
+
+  /* ---------------- collections (grouping of collected cards) ---------------- */
+  createCollection(input: NewCollection): Promise<Collection>;
+  getCollectionById(id: UUID): Promise<Collection | null>;
+  /** Exact (case-insensitive) name lookup within a user's collections. */
+  findCollectionByName(userId: UUID, name: string): Promise<Collection | null>;
+  listCollectionsByUser(userId: UUID): Promise<Collection[]>;
+  /** Resolve-or-create a collection by name for the user (idempotent per name). */
+  upsertCollectionByName(userId: UUID, name: string): Promise<Collection>;
 
   /* ---------------- conversation state machine ---------------- */
   /** Current state for a user; returns a transient 'idle' default if no row exists yet. */

@@ -84,13 +84,34 @@ export const ptBR = {
     '*1* — Adicionar um negócio\n' +
     '*2* — Consultar negócios\n' +
     '*3* — Adicionar um contato a um negócio\n' +
-    '*4* — Adicionar um cartão de visita\n\n' +
-    'Responda com *1*, *2*, *3* ou *4*. (Você também pode enviar a foto de um cartão — ou ' +
+    '*4* — Adicionar um cartão de visita\n' +
+    '*5* — Agrupar cartões em uma coleção\n\n' +
+    'Responda com *1*, *2*, *3*, *4* ou *5*. (Você também pode enviar a foto de um cartão — ou ' +
     'um áudio — a qualquer momento.)',
+
+  /** Appended to the menu when the user has an active collection. */
+  menuActiveCollection: (name: string) =>
+    `\n\nColeção atual: *${name}*. Os cartões que você escanear entram nela.`,
 
   menuNotUnderstood:
     'Não entendi a opção. Responda com *1* (Adicionar negócio), *2* (Consultar), ' +
-    '*3* (Adicionar contato) ou *4* (Adicionar cartão).',
+    '*3* (Adicionar contato), *4* (Adicionar cartão) ou *5* (Coleção).',
+
+  /* ---- Coleções ---- */
+
+  collectionPrompt:
+    'Dê um nome para a coleção onde você quer agrupar os cartões — por exemplo: ' +
+    '"Feira Rio 2022". Os próximos cartões que você escanear entram nessa coleção.\n\n' +
+    'Digite *nenhuma* para parar de agrupar.\n\n' +
+    BACK,
+
+  collectionSet: (name: string) =>
+    `Pronto! A coleção atual é *${name}*. Agora envie as *fotos dos cartões* e eu os ` +
+    'adiciono a ela automaticamente.\n\n' +
+    BACK,
+
+  collectionCleared:
+    'Certo! Os próximos cartões não serão mais agrupados em uma coleção.\n\n' + BACK,
 
   /** Prompt after the user chooses "Adicionar cartão" from the menu. */
   cardAwaitPrompt:

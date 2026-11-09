@@ -11,6 +11,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 import type {
+  Collection,
   ConversationState,
   ConversationStateName,
   Embedding,
@@ -21,6 +22,7 @@ import type {
   EntityStatus,
   Job,
   MediaMatch,
+  NewCollection,
   NewEntity,
   NewEntityContact,
   NewEntityMedia,
@@ -75,7 +77,10 @@ export class SupabaseRepository implements Repository {
     return this.createUser({ ...defaults, waId });
   }
 
-  async updateUser(id: UUID, patch: Partial<NewUser> & { lastSeenAt?: string }): Promise<User> {
+  async updateUser(
+    id: UUID,
+    patch: Partial<NewUser> & { lastSeenAt?: string; activeCollectionId?: UUID | null },
+  ): Promise<User> {
     const { data, error } = await this.db
       .from('users')
       .update(pruneUndefined({
@@ -84,6 +89,7 @@ export class SupabaseRepository implements Repository {
         wa_id: patch.waId,
         locale: patch.locale,
         last_seen_at: patch.lastSeenAt,
+        active_collection_id: patch.activeCollectionId,
       }))
       .eq('id', id)
       .select('*')
@@ -110,6 +116,7 @@ export class SupabaseRepository implements Repository {
         category: input.category,
         confidence: input.confidence,
         enrichment: input.enrichment ?? {},
+        collection_id: input.collectionId,
         created_by: input.createdBy,
       }))
       .select(ENTITY_COLS)
@@ -160,6 +167,7 @@ export class SupabaseRepository implements Repository {
         category: patch.category,
         confidence: patch.confidence,
         enrichment: patch.enrichment,
+        collection_id: patch.collectionId,
       }))
       .eq('id', id)
       .select(ENTITY_COLS)
@@ -316,6 +324,61 @@ export class SupabaseRepository implements Repository {
     return (data ?? []).map(rowToContact);
   }
 
+  /* ======================= collections ======================= */
+
+  async createCollection(input: NewCollection): Promise<Collection> {
+    const { data, error } = await this.db
+      .from('collections')
+      .insert(pruneUndefined({
+        name: input.name,
+        notes: input.notes,
+        collected_on: input.collectedOn,
+        location: input.location,
+        created_by: input.createdBy,
+      }))
+      .select(COLLECTION_COLS)
+      .single();
+    if (error) throw mapError('createCollection', error);
+    return rowToCollection(data);
+  }
+
+  async getCollectionById(id: UUID): Promise<Collection | null> {
+    const { data, error } = await this.db
+      .from('collections')
+      .select(COLLECTION_COLS)
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw mapError('getCollectionById', error);
+    return data ? rowToCollection(data) : null;
+  }
+
+  async findCollectionByName(userId: UUID, name: string): Promise<Collection | null> {
+    const { data, error } = await this.db
+      .from('collections')
+      .select(COLLECTION_COLS)
+      .eq('created_by', userId)
+      .ilike('name', name.trim()) // exact match, case-insensitive (no wildcards)
+      .maybeSingle();
+    if (error) throw mapError('findCollectionByName', error);
+    return data ? rowToCollection(data) : null;
+  }
+
+  async listCollectionsByUser(userId: UUID): Promise<Collection[]> {
+    const { data, error } = await this.db
+      .from('collections')
+      .select(COLLECTION_COLS)
+      .eq('created_by', userId)
+      .order('created_at', { ascending: false });
+    if (error) throw mapError('listCollectionsByUser', error);
+    return (data ?? []).map(rowToCollection);
+  }
+
+  async upsertCollectionByName(userId: UUID, name: string): Promise<Collection> {
+    const existing = await this.findCollectionByName(userId, name);
+    if (existing) return existing;
+    return this.createCollection({ name: name.trim(), createdBy: userId });
+  }
+
   /* ======================= conversation state ======================= */
 
   async getConversationState(userId: UUID): Promise<ConversationState> {
@@ -452,10 +515,11 @@ export class SupabaseRepository implements Repository {
 /* ======================= column lists ======================= */
 // Explicit lists so we can parse the pgvector columns (returned as strings).
 const ENTITY_COLS =
-  'id,name,description,description_embedding,metadata,status,source,phone,email,website,address,category,confidence,enrichment,embedding_model,embedding_dim,created_by,created_at,modified_at,confirmed_at';
+  'id,name,description,description_embedding,metadata,status,source,phone,email,website,address,category,confidence,enrichment,embedding_model,embedding_dim,collection_id,created_by,created_at,modified_at,confirmed_at';
 const MEDIA_COLS =
   'id,entity_id,embedding,storage_url,media_type,mime_type,sha256,caption,wa_message_id,width,height,embedding_model,created_at';
 const CONTACT_COLS = 'id,entity_id,name,role,phone,email,label,source,metadata,created_at';
+const COLLECTION_COLS = 'id,name,notes,collected_on,location,created_by,created_at';
 
 /* ======================= row mappers ======================= */
 
@@ -469,6 +533,7 @@ function rowToUser(r: Row): User {
     waId: r.wa_id ?? null,
     locale: r.locale,
     lastSeenAt: r.last_seen_at ?? null,
+    activeCollectionId: r.active_collection_id ?? null,
     createdAt: r.created_at,
   };
 }
@@ -491,6 +556,7 @@ function rowToEntity(r: Row): Entity {
     enrichment: r.enrichment ?? {},
     embeddingModel: r.embedding_model ?? null,
     embeddingDim: r.embedding_dim ?? null,
+    collectionId: r.collection_id ?? null,
     createdBy: r.created_by,
     createdAt: r.created_at,
     modifiedAt: r.modified_at,
@@ -527,6 +593,18 @@ function rowToContact(r: Row): EntityContact {
     label: r.label ?? null,
     source: r.source ?? null,
     metadata: r.metadata ?? {},
+    createdAt: r.created_at,
+  };
+}
+
+function rowToCollection(r: Row): Collection {
+  return {
+    id: r.id,
+    name: r.name,
+    notes: r.notes ?? null,
+    collectedOn: r.collected_on ?? null,
+    location: r.location ?? null,
+    createdBy: r.created_by,
     createdAt: r.created_at,
   };
 }
