@@ -286,7 +286,7 @@ export class TelegramTransport implements MessageTransport {
   /* ======================= outbound ======================= */
 
   async sendText(chatId: ChatId, text: string): Promise<string> {
-    const res = await this.api<TgMessage>('sendMessage', { chat_id: chatId, text });
+    const res = await this.api<TgMessage>('sendMessage', { chat_id: chatId, text: stripWaFormatting(text) });
     return res ? String(res.message_id) : '';
   }
 
@@ -296,14 +296,14 @@ export class TelegramTransport implements MessageTransport {
       const res = await this.api<TgMessage>('sendPhoto', {
         chat_id: chatId,
         photo: image.url,
-        ...(image.caption ? { caption: image.caption } : {}),
+        ...(image.caption ? { caption: stripWaFormatting(image.caption) } : {}),
       });
       return res ? String(res.message_id) : '';
     }
     if (image.data) {
       const form = new FormData();
       form.append('chat_id', String(chatId));
-      if (image.caption) form.append('caption', image.caption);
+      if (image.caption) form.append('caption', stripWaFormatting(image.caption));
       const blob = new Blob([image.data], { type: image.mimeType ?? 'image/jpeg' });
       form.append('photo', blob, image.filename ?? 'image.jpg');
       const res = await this.apiForm<TgMessage>('sendPhoto', form);
@@ -320,7 +320,7 @@ export class TelegramTransport implements MessageTransport {
     ];
     const res = await this.api<TgMessage>('sendMessage', {
       chat_id: chatId,
-      text: body,
+      text: stripWaFormatting(body),
       reply_markup: { inline_keyboard },
     });
     return res ? String(res.message_id) : '';
@@ -373,6 +373,24 @@ export class TelegramTransport implements MessageTransport {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Shared messages are authored in WhatsApp markup (`*bold*`, `_italic_`,
+ * `~strike~`). Telegram sends plain text (no parse_mode), so those markers would
+ * render literally (e.g. "*1*"). Strip the emphasis pairs for Telegram, leaving
+ * the text itself intact.
+ *
+ * Only well-formed pairs are removed: the opening marker must hug the text (no
+ * following space) and, for `_`, be bounded by whitespace/start and
+ * whitespace/punctuation/end — so underscores inside emails and URLs
+ * (john_doe@x.com, /a_b) are left alone.
+ */
+function stripWaFormatting(text: string): string {
+  return text
+    .replace(/\*(?=\S)([^*\n]*?\S)\*/g, '$1') // *bold*
+    .replace(/(^|[\s(])_(?=\S)([^_\n]*?\S)_(?=[\s).,!?;:]|$)/g, '$1$2') // _italic_
+    .replace(/~(?=\S)([^~\n]*?\S)~/g, '$1'); // ~strike~
 }
 
 /**

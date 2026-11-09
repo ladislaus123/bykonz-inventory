@@ -94,9 +94,9 @@ export class WhatsAppFlow {
         return;
       }
 
-      // Global escape hatch: a greeting always opens the menu.
-      if (!hasDownloadableMedia && msg.type === 'text' && isGreeting(text)) {
-        log('flow', 'greeting -> menu');
+      // Global escape hatch: a greeting — or "0" from anywhere — opens the menu.
+      if (!hasDownloadableMedia && msg.type === 'text' && (text === '0' || isGreeting(text))) {
+        log('flow', `${text === '0' ? '"0"' : 'greeting'} -> menu`);
         await this.showMenu(user.id, msg.chatId, transport);
         return;
       }
@@ -679,7 +679,10 @@ export class WhatsAppFlow {
     mediaIds.push(mediaId);
     await this.repo.setConversationState(userId, 'card_collecting', { ...context, mediaIds });
     log('flow', `card_collecting: entity ${entityId} now has ${mediaIds.length} photo(s)`);
-    await transport.sendText(msg.chatId, ptBR.cardMoreReceived);
+    // Keep the "Processar agora" action on the follow-up too, like the first photo.
+    await transport.sendButtons(msg.chatId, ptBR.cardMoreReceived, [
+      { id: 'card_done', title: ptBR.cardProcessNow },
+    ]);
   }
 
   /** Close the capture and enqueue a single extraction over all collected photos. */
