@@ -754,7 +754,19 @@ export class WhatsAppFlow {
     proposal: { name: string; summary: string },
   ): Promise<void> {
     await this.repo.setConversationState(userId, 'awaiting_decision', { entityId });
-    await this.transports.get(channel).sendButtons(chatId, ptBR.proposal(proposal), [
+    // Enrich the proposal with the contact details the agent saved on the entity
+    // (phone/email/website/address/category), so the user sees them before confirming.
+    const entity = await this.repo.getEntityById(entityId).catch(() => null);
+    const body = ptBR.proposal({
+      name: proposal.name,
+      summary: proposal.summary,
+      category: entity?.category,
+      phone: entity?.phone,
+      email: entity?.email,
+      website: entity?.website,
+      address: entity?.address,
+    });
+    await this.transports.get(channel).sendButtons(chatId, body, [
       { id: 'accept', title: ptBR.accept },
       { id: 'reject', title: ptBR.reject },
     ]);

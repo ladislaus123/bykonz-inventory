@@ -34,8 +34,28 @@ export const ptBR = {
     'negócio na internet. Isso leva alguns segundos…',
 
   /** Rendered after the agent finishes; data is interpolated. */
-  proposal: (e: { name: string; summary: string }) =>
-    `Encontrei isto:\n\n*${e.name}*\n${e.summary}\n\nPosso salvar essas informações?`,
+  proposal: (e: {
+    name: string;
+    summary: string;
+    category?: string | null;
+    phone?: string | null;
+    email?: string | null;
+    website?: string | null;
+    address?: string | null;
+  }) => {
+    const lines = [`Encontrei isto:\n\n*${e.name}*`];
+    if (e.category) lines.push(`🏷️ ${e.category}`);
+    if (e.summary) lines.push(e.summary);
+    // Contact details extracted from the card / enrichment, when present.
+    const contacts: string[] = [];
+    if (e.phone) contacts.push(`📞 ${e.phone}`);
+    if (e.email) contacts.push(`✉️ ${e.email}`);
+    if (e.website) contacts.push(`🌐 ${e.website}`);
+    if (e.address) contacts.push(`📍 ${e.address}`);
+    if (contacts.length) lines.push(contacts.join('\n'));
+    lines.push('Posso salvar essas informações?');
+    return lines.join('\n\n');
+  },
 
   accept: 'Aceitar ✅',
   reject: 'Recusar ❌',
