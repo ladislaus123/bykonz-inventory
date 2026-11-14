@@ -492,14 +492,37 @@ export class WhatsAppFlow {
   }
 
   private async searchConfirmed(query: string): Promise<EntityMatch[]> {
+    // Two independent lookups, always run together and merged (no mode switch):
+    //  - a direct contact-name lookup, for queries that name a PERSON (CEO,
+    //    sales rep, …) whose name lives in entity_contacts and never reaches
+    //    the description embedding; and
+    //  - the semantic vector search + LLM rerank, for everything else.
+    // A name query yields contact hits and (usually) an empty reranked list; a
+    // concept query yields no contact hits and the usual semantic results.
+    const byContactP = this.repo
+      .findEntitiesByContactName(query, { status: 'confirmed', limit: CONSULT_CANDIDATES })
+      .catch((err) => {
+        logErr('flow', 'consultar: contact-name lookup failed, using semantic only', err);
+        return [] as EntityMatch[];
+      });
+
     const vec = await this.embeddings.embedText(query);
     const candidates = await this.repo.searchEntities(vec, {
       status: 'confirmed',
       matchCount: CONSULT_CANDIDATES,
       similarityThreshold: CONSULT_MIN_SIMILARITY,
     });
-    const matches = await this.rerankMatches(query, candidates);
-    log('flow', `search: query="${query}" -> ${candidates.length} candidate(s) -> ${matches.length} match(es)`);
+    const reranked = await this.rerankMatches(query, candidates);
+
+    const byContact = await byContactP;
+    // Contact-name hits first (they answer an explicit name query precisely),
+    // then the semantic matches; dedupe by entity id.
+    const matches = dedupeById([...byContact, ...reranked]);
+    log(
+      'flow',
+      `search: query="${query}" -> ${byContact.length} contact-name + ${candidates.length} vector ` +
+        `candidate(s) -> ${matches.length} match(es)`,
+    );
     return matches;
   }
 
@@ -987,6 +1010,18 @@ function parseScoreMap(text: string, max: number): number[] | null {
   // Higher score first; preserve the candidates' (similarity) order within a tie.
   scored.sort((a, b) => b.s - a.s || a.n - b.n);
   return scored.map((x) => x.n);
+}
+
+/** Keep the first occurrence of each entity id, preserving order. */
+function dedupeById(matches: EntityMatch[]): EntityMatch[] {
+  const seen = new Set<string>();
+  const out: EntityMatch[] = [];
+  for (const m of matches) {
+    if (seen.has(m.id)) continue;
+    seen.add(m.id);
+    out.push(m);
+  }
+  return out;
 }
 
 /** Adapt a full Entity into the EntityMatch shape the renderer/reranker expect. */

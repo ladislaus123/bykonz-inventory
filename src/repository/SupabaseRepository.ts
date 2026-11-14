@@ -224,6 +224,51 @@ export class SupabaseRepository implements Repository {
     return (data ?? []) as EntityMatch[];
   }
 
+  async findEntitiesByContactName(
+    name: string,
+    opts?: { status?: EntityStatus; limit?: number },
+  ): Promise<EntityMatch[]> {
+    const q = name.trim();
+    if (q.length < 2) return []; // too short to be a meaningful name lookup
+
+    // Embedded (inner-join) read: keep only contacts whose owning entity exists
+    // and, when asked, matches the status filter. `!inner` drops contacts with
+    // no matching entity rather than returning a null embed.
+    let query = this.db
+      .from('entity_contacts')
+      .select('name, entity:entities!inner(id,name,description,metadata,status,created_by)')
+      .ilike('name', `%${escapeLike(q)}%`)
+      .limit(opts?.limit ?? 20);
+    if (opts?.status) query = query.eq('entity.status', opts.status);
+
+    const { data, error } = await query;
+    if (error) throw mapError('findEntitiesByContactName', error);
+
+    const needle = q.toLowerCase();
+    const byId = new Map<UUID, EntityMatch>();
+    for (const row of (data ?? []) as Row[]) {
+      // PostgREST returns the embedded to-one either as an object or, in some
+      // versions, a single-element array — normalize both.
+      const e = Array.isArray(row.entity) ? row.entity[0] : row.entity;
+      if (!e) continue;
+      const exact = typeof row.name === 'string' && row.name.trim().toLowerCase() === needle;
+      const similarity = exact ? 1 : 0.9;
+      const existing = byId.get(e.id);
+      // One entity can own several matching contacts; keep the strongest.
+      if (existing && existing.similarity >= similarity) continue;
+      byId.set(e.id, {
+        id: e.id,
+        name: e.name,
+        description: e.description ?? null,
+        metadata: e.metadata ?? {},
+        status: e.status,
+        createdBy: e.created_by,
+        similarity,
+      });
+    }
+    return [...byId.values()].sort((a, b) => b.similarity - a.similarity);
+  }
+
   /* ======================= entity_media ======================= */
 
   async createMedia(input: NewEntityMedia): Promise<EntityMedia> {
@@ -660,6 +705,15 @@ function rowToJob(r: Row): Job {
 /** pgvector is written as the literal "[1,2,3]"; PostgREST accepts that string. */
 function toVectorLiteral(v: Embedding): string {
   return `[${v.join(',')}]`;
+}
+
+/**
+ * Escape LIKE/ILIKE wildcards so a user's query is matched literally — a name
+ * containing %, _ or \ must not become a wildcard pattern. We wrap the result
+ * in our own %...% for substring search.
+ */
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, (ch) => `\\${ch}`);
 }
 
 /** PostgREST returns vector columns as a "[1,2,3]" string (or null). */

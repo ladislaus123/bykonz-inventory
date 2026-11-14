@@ -58,6 +58,18 @@ export interface Repository {
   deleteEntity(id: UUID): Promise<void>;
   /** Cosine similarity search over description_embedding via the match_entities RPC. */
   searchEntities(embedding: Embedding, opts?: VectorSearchOptions & { status?: EntityStatus }): Promise<EntityMatch[]>;
+  /**
+   * Direct (case-insensitive substring) lookup of businesses by one of their
+   * CONTACT people's names — the piece semantic search can't reach, since
+   * contact names live in entity_contacts and never enter the description
+   * embedding. Returns one EntityMatch per owning entity (deduped), where
+   * `similarity` is 1 for an exact name match and 0.9 for a substring match, so
+   * callers can rank these ahead of semantic hits.
+   */
+  findEntitiesByContactName(
+    name: string,
+    opts?: { status?: EntityStatus; limit?: number },
+  ): Promise<EntityMatch[]>;
 
   /* ---------------- entity_media ---------------- */
   createMedia(input: NewEntityMedia): Promise<EntityMedia>;

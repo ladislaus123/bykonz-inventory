@@ -12,6 +12,12 @@
     "start": "node dist/server.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:tests": "tsc -p tests/tsconfig.json --noEmit",
+    "test": "npm run typecheck:tests && npm run test:unit && npm run test:live:auto",
+    "test:unit": "node --import tsx --test --test-concurrency=1 tests/unit/*.test.ts",
+    "test:live": "RUN_LIVE_TESTS=1 node --import tsx --test --test-concurrency=1 tests/live/*.test.ts",
+    "test:live:auto": "node --import tsx --test --test-concurrency=1 tests/live/*.test.ts",
+    "test:ci": "RUN_LIVE_TESTS=1 npm test",
     "storage:check": "node scripts/storage-check.mjs"
   },
   "dependencies": {
